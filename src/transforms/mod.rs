@@ -17,7 +17,7 @@ pub mod ui_initializer;
 
 /// Build the ordered transform list from a `TransformsConfig`.
 ///
-/// Order: `UiInitializer` → `ToolFormatter` → `ToolResultEnricher` (Claude only) → `ToolGrouper` →
+/// Order: `UiInitializer` → `ToolFormatter` → `ToolResultEnricher` (Claude + Cursor) → `ToolGrouper` →
 ///        `MarkdownSplitter` (opt-in) → `TableConverter` (opt-in) → `LuaTransform` (opt-in).
 /// ToolFormatter runs before ToolGrouper so that container labels can be derived from already-formatted child text.
 /// ToolResultEnricher runs before ToolGrouper so that when the grouper mirrors ToolResult children into its buffer,
@@ -38,10 +38,11 @@ pub fn build_transforms(
         provider,
         workspace_path.map(|p| p.to_path_buf()),
     )));
-    if *provider == ProviderKind::Claude {
+    if matches!(provider, ProviderKind::Claude | ProviderKind::Cursor) {
         transforms.push(Box::new(tool_result_enricher::ToolResultEnricher::new(
             file_delta_cfg,
             workspace_path.map(|p| p.to_path_buf()),
+            provider.clone(),
         )));
     }
     transforms.push(Box::new(tool_grouper::ToolGrouper::new(

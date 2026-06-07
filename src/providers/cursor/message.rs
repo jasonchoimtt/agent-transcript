@@ -295,7 +295,7 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                             message: MessageState::new(format!("tool_result:{}", tool_call_id))
                                 .text(failure_text)
                                 .data(
-                                    serde_json::json!({ "call": call_block, "result": block })
+                                    serde_json::json!({ "call": call_block, "result": block, "message": &obj })
                                         .to_string(),
                                 )
                                 .message_type(MessageType::ToolResult)
@@ -323,7 +323,8 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                                 .data(
                                     serde_json::json!({
                                         "call": call_block,
-                                        "result": block
+                                        "result": block,
+                                        "message": &obj
                                     })
                                     .to_string(),
                                 )
@@ -360,7 +361,7 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                         message: MessageState::new(result_id)
                             .text(result_text)
                             .data(
-                                serde_json::json!({ "call": call_block, "result": block })
+                                serde_json::json!({ "call": call_block, "result": block, "message": &obj })
                                     .to_string(),
                             )
                             .message_type(MessageType::ToolResult)
