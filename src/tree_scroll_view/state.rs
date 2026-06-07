@@ -1684,26 +1684,31 @@ impl TreeScrollViewState {
             .unwrap_or(0);
         let viewport_width = self.viewport_width;
         if let Some(node) = get_node_mut(&mut self.items, &path) {
-            if !node.show_more && !node.group {
-                if content_needs_show_more(node, viewport_width, visual_depth) {
+            if content_needs_show_more(node, viewport_width, visual_depth) {
+                if !node.show_more && !node.group {
                     // Step 1: reveal full text (only when there's actually more to show)
                     node.show_more = true;
                     node.height = None;
-                } else if !node.children.is_empty() {
-                    // Nothing more to show — toggle expanded directly
+                } else if !node.expanded && !node.children.is_empty() {
+                    // Step 2: expand children
+                    node.expanded = true;
+                    node.height = None;
+                } else {
+                    // Step 3: collapse back to compact
+                    node.show_more = false;
+                    node.expanded = false;
+                    node.height = None;
+                }
+            } else {
+                if !node.show_more {
+                    // Inconsistent state, fix it
+                    node.show_more = true;
+                    node.height = None;
+                }
+                if !node.children.is_empty() {
                     node.expanded = !node.expanded;
                     node.height = None;
                 }
-                // else: no children, no extra text → no-op
-            } else if !node.expanded && !node.children.is_empty() {
-                // Step 2: expand children
-                node.expanded = true;
-                node.height = None;
-            } else {
-                // Step 3: collapse back to compact
-                node.show_more = false;
-                node.expanded = false;
-                node.height = None;
             }
         }
         self.rectify_selection_and_top();

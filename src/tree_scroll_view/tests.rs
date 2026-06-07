@@ -617,14 +617,25 @@ fn cycle_display_noop_on_short_text_no_children() {
     let mut state = TreeScrollViewState::new(vec![short_msg("a")]);
     do_layout(&mut state, 80, 24);
 
-    let show_more_before = get_node(&state.items, &[0]).unwrap().show_more;
     let expanded_before = get_node(&state.items, &[0]).unwrap().expanded;
     state.cycle_display();
     do_layout(&mut state, 80, 24);
 
+    // Still sets show_more to ensure markdown styles fully show up
     assert_eq!(
         get_node(&state.items, &[0]).unwrap().show_more,
-        show_more_before
+        true
+    );
+    assert_eq!(
+        get_node(&state.items, &[0]).unwrap().expanded,
+        expanded_before
+    );
+
+    state.cycle_display();
+    do_layout(&mut state, 80, 24);
+    assert_eq!(
+        get_node(&state.items, &[0]).unwrap().show_more,
+        true
     );
     assert_eq!(
         get_node(&state.items, &[0]).unwrap().expanded,
@@ -663,13 +674,14 @@ fn cycle_display_skips_show_more_when_text_fits_with_children() {
     let mut state = TreeScrollViewState::new(items);
     do_layout(&mut state, 80, 24);
 
-    state.cycle_display(); // should expand directly without setting show_more
+    state.cycle_display(); // should expand directly and also force show more
     do_layout(&mut state, 80, 24);
-    assert!(!get_node(&state.items, &[0]).unwrap().show_more);
+    assert!(get_node(&state.items, &[0]).unwrap().show_more);
     assert!(get_node(&state.items, &[0]).unwrap().expanded);
 
-    state.cycle_display(); // collapse back
+    state.cycle_display(); // collapse back without unsetting show_more
     do_layout(&mut state, 80, 24);
+    assert!(get_node(&state.items, &[0]).unwrap().show_more);
     assert!(!get_node(&state.items, &[0]).unwrap().expanded);
 }
 
