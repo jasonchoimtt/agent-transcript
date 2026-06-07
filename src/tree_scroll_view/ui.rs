@@ -157,23 +157,14 @@ impl StatefulWidget for TreeScrollView<'_> {
                     let msg_style = theme.style_for(&node.message_type);
 
                     MessageWidget {
-                        text: node.text.as_deref(),
+                        node,
                         depth,
                         selected,
-                        expanded: node.expanded,
-                        has_children: !node.children.is_empty(),
                         skip_lines: skip,
-                        show_more: node.show_more,
-                        brief: node.brief.as_deref(),
                         group_descent,
                         last_row_is_pad,
-                        show_indicator: node.show_indicator,
-                        xml_tag: node.tag.as_deref(),
                         style: msg_style,
                         palette: &theme.palette,
-                        message_type: &node.message_type,
-                        display_kind: node.data.as_str(),
-                        ui_state: node.ui_state.as_deref(),
                         interaction: selected && message_interaction,
                     }
                     .render(widget_area, buf);
