@@ -7,11 +7,11 @@ fn nearest_non_hidden(items: &[MessageState], start: usize) -> Option<usize> {
     }
     let clamped = start.min(items.len() - 1);
     for i in (0..=clamped).rev() {
-        if !items[i].hidden {
+        if !items[i].hidden.is_hidden() {
             return Some(i);
         }
     }
-    ((clamped + 1)..items.len()).find(|&i| !items[i].hidden)
+    ((clamped + 1)..items.len()).find(|&i| !items[i].hidden.is_hidden())
 }
 
 /// Compute visual depth for `path` by counting ancestors with `indent_children: true`.
@@ -123,7 +123,7 @@ impl TreeCursor {
 
     /// Point at the last node satisfying `predicate`.
     pub fn last(root: &[MessageState], predicate: fn(&MessageState) -> bool) -> Option<Self> {
-        let i = root.iter().rposition(|n| !n.hidden)?;
+        let i = root.iter().rposition(|n| !n.hidden.is_hidden())?;
         let mut cur = Self {
             path: vec![i],
             visual_depth: 0,
@@ -194,7 +194,7 @@ impl TreeCursor {
         };
 
         // Step 1: next non-hidden sibling at the same level (groups are fine).
-        if let Some(offset) = siblings[i + 1..].iter().position(|s| !s.hidden) {
+        if let Some(offset) = siblings[i + 1..].iter().position(|s| !s.hidden.is_hidden()) {
             *self.path.last_mut().unwrap() = i + 1 + offset;
             return true;
         }
@@ -218,7 +218,7 @@ impl TreeCursor {
             } else {
                 &get_node(root, &self.path).unwrap().children
             };
-            if let Some(offset) = siblings[i + 1..].iter().position(|s| !s.hidden) {
+            if let Some(offset) = siblings[i + 1..].iter().position(|s| !s.hidden.is_hidden()) {
                 self.path.push(i + 1 + offset);
                 if nonzero_height(self.node(root)) {
                     return true;
@@ -243,7 +243,7 @@ impl TreeCursor {
                 .unwrap()
                 .children
         };
-        if let Some(prev_i) = siblings[..i].iter().rposition(|s| !s.hidden) {
+        if let Some(prev_i) = siblings[..i].iter().rposition(|s| !s.hidden.is_hidden()) {
             *self.path.last_mut().unwrap() = prev_i;
             return true;
         }
@@ -262,13 +262,17 @@ impl TreeCursor {
         true
     }
 
-    /// Step to the next non-hidden node in DFS order. Returns `false` at end.
-    fn advance_one(&mut self, root: &[MessageState]) -> bool {
-        // 1. Descend into first non-hidden child if expanded.
+    /// Step to the next node matching `include` in DFS order. Returns `false` at end.
+    pub fn advance_one_with(
+        &mut self,
+        root: &[MessageState],
+        include: fn(&MessageState) -> bool,
+    ) -> bool {
+        // 1. Descend into first child matching `include` if expanded.
         {
             let node = get_node(root, &self.path).unwrap();
             if node.expanded
-                && let Some(ci) = nearest_non_hidden(&node.children, 0)
+                && let Some(ci) = node.children.iter().position(include)
             {
                 if node.indent_children {
                     self.visual_depth += 1;
@@ -278,7 +282,7 @@ impl TreeCursor {
             }
         }
 
-        // 2. Backtrack until we find a next non-hidden sibling.
+        // 2. Backtrack until we find a next sibling matching `include`.
         loop {
             let i = match self.path.pop() {
                 Some(i) => i,
@@ -289,8 +293,7 @@ impl TreeCursor {
             } else {
                 &get_node(root, &self.path).unwrap().children
             };
-            if let Some(offset) = siblings[i + 1..].iter().position(|s| !s.hidden) {
-                // Sibling found at the same level — depth is unchanged.
+            if let Some(offset) = siblings[i + 1..].iter().position(include) {
                 self.path.push(i + 1 + offset);
                 return true;
             }
@@ -305,8 +308,12 @@ impl TreeCursor {
         }
     }
 
-    /// Step to the previous non-hidden node in DFS order. Returns `false` at start.
-    fn retreat_one(&mut self, root: &[MessageState]) -> bool {
+    /// Step to the previous node matching `include` in DFS order. Returns `false` at start.
+    pub fn retreat_one_with(
+        &mut self,
+        root: &[MessageState],
+        include: fn(&MessageState) -> bool,
+    ) -> bool {
         let i = match self.path.last() {
             Some(&i) => i,
             None => return false,
@@ -320,19 +327,15 @@ impl TreeCursor {
                 .children
         };
 
-        // Previous non-hidden sibling?
-        if let Some(prev_i) = siblings[..i].iter().rposition(|s| !s.hidden) {
+        if let Some(prev_i) = siblings[..i].iter().rposition(include) {
             *self.path.last_mut().unwrap() = prev_i;
-            // visual_depth unchanged (same parent)
-            self.descend_to_last(root);
+            self.descend_to_last_with(root, include);
             return true;
         }
 
-        // No prev sibling: parent is the previous node.
         if self.path.len() == 1 {
-            return false; // already at very first node
+            return false;
         }
-        // Undo the visual_depth contribution of the parent we're ascending to.
         let parent_len = self.path.len() - 1;
         if get_node(root, &self.path[..parent_len])
             .map(|n| n.indent_children)
@@ -344,14 +347,13 @@ impl TreeCursor {
         true
     }
 
-    /// Descend into the last visible leaf of the current node.
-    fn descend_to_last(&mut self, root: &[MessageState]) {
+    fn descend_to_last_with(&mut self, root: &[MessageState], include: fn(&MessageState) -> bool) {
         loop {
             let node = get_node(root, &self.path).unwrap();
             if !node.expanded || node.children.is_empty() {
                 return;
             }
-            match node.children.iter().rposition(|c| !c.hidden) {
+            match node.children.iter().rposition(include) {
                 Some(last_i) => {
                     if node.indent_children {
                         self.visual_depth += 1;
@@ -361,6 +363,44 @@ impl TreeCursor {
                 None => return,
             }
         }
+    }
+
+    fn advance_one(&mut self, root: &[MessageState]) -> bool {
+        self.advance_one_with(root, |n| !n.hidden.is_hidden())
+    }
+
+    fn retreat_one(&mut self, root: &[MessageState]) -> bool {
+        self.retreat_one_with(root, |n| !n.hidden.is_hidden())
+    }
+
+    fn descend_to_last(&mut self, root: &[MessageState]) {
+        self.descend_to_last_with(root, |n| !n.hidden.is_hidden())
+    }
+
+    /// Count `Hidden`-state nodes in DFS order between the current position and
+    /// the next non-hidden node. Used to render the braille indicator in the padding row.
+    pub fn count_hidden_to_next(&self, root: &[MessageState]) -> usize {
+        use super::state::HiddenState;
+        let mut probe = Self {
+            path: self.path.clone(),
+            visual_depth: self.visual_depth,
+        };
+        let mut count = 0;
+        loop {
+            if !probe.advance_one_with(root, |_| true) {
+                break;
+            }
+            let node = match get_node(root, &probe.path) {
+                Some(n) => n,
+                None => break,
+            };
+            if node.hidden == HiddenState::Hidden {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count
     }
 }
 

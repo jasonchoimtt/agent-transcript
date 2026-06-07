@@ -37,6 +37,18 @@ pub enum TreeAction {
     CopyMarkdown,
     CopyPlainText,
     CopyRawData,
+    // open / close with optional hidden-reveal
+    OpenNode,
+    CloseNode,
+    OpenRevealHidden,
+    CloseHideRevealed,
+    // step into / past hidden nodes
+    RevealNextFive,
+    RevealPrevFive,
+    RevealJumpForward,
+    RevealJumpBackward,
+    // global hidden toggle
+    ToggleAllHidden,
     Quit,
     None,
 }
@@ -83,6 +95,9 @@ impl KeyParser {
                     KeyCode::Char('t') => TreeAction::ScrollSelectionToTop,
                     KeyCode::Char('z') => TreeAction::ScrollSelectionToMiddle,
                     KeyCode::Char('b') => TreeAction::ScrollSelectionToBottom,
+                    KeyCode::Char('h') => TreeAction::ToggleAllHidden,
+                    KeyCode::Char('J') => TreeAction::RevealJumpForward,
+                    KeyCode::Char('K') => TreeAction::RevealJumpBackward,
                     _ => TreeAction::None,
                 },
                 KeyCode::Char('y') => match key.code {
@@ -113,6 +128,14 @@ impl KeyParser {
             KeyCode::Up | KeyCode::Char('k') => TreeAction::SelectPrev,
             KeyCode::Right | KeyCode::Char('l') => TreeAction::SelectChild,
             KeyCode::Left | KeyCode::Char('h') => TreeAction::SelectParent,
+
+            KeyCode::Char('J') => TreeAction::RevealNextFive,
+            KeyCode::Char('K') => TreeAction::RevealPrevFive,
+
+            KeyCode::Char('o') if !ctrl => TreeAction::OpenNode,
+            KeyCode::Char('c') if !ctrl => TreeAction::CloseNode,
+            KeyCode::Char('O') => TreeAction::OpenRevealHidden,
+            KeyCode::Char('C') => TreeAction::CloseHideRevealed,
 
             KeyCode::Enter => TreeAction::ToggleExpand,
             KeyCode::Char(' ') => TreeAction::CycleDisplay,

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::config::{TypeEntry, UiInitializerConfig};
 use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
-use crate::tree_scroll_view::state::MessageType;
+use crate::tree_scroll_view::state::{HiddenState, MessageType};
 
 /// Sets `expanded`, `show_more`, and `hidden` on each Append/Replace/Update message based on its
 /// `MessageType` and tag, using the per-type and per-tag rules from `UiInitializerConfig`
@@ -31,7 +31,7 @@ impl UiInitializer {
         tag: Option<&str>,
         expanded: &mut bool,
         show_more: &mut bool,
-        hidden: &mut bool,
+        hidden: &mut HiddenState,
     ) {
         let key = message_type.variant_name();
         let entry = self.flags.get(key);
@@ -42,7 +42,11 @@ impl UiInitializer {
             && let Some(tf) = entry.and_then(|e| e.tags.get(tag))
         {
             if let Some(h) = tf.hidden {
-                *hidden = h;
+                *hidden = if h {
+                    HiddenState::Hidden
+                } else {
+                    HiddenState::NotHidden
+                };
             }
             if let Some(e) = tf.expanded {
                 *expanded = e;
@@ -101,7 +105,7 @@ impl Transform for UiInitializer {
 mod tests {
     use super::*;
     use crate::config::{Config, UiInitializerConfig};
-    use crate::tree_scroll_view::state::{MessageState, MessageType};
+    use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
     fn default_init() -> UiInitializer {
         UiInitializer::new(Config::default().transforms.ui_initializer)
@@ -137,7 +141,7 @@ mod tests {
         let msg = get_message(out.into_iter().next().unwrap());
         assert!(!msg.show_more);
         assert!(!msg.expanded);
-        assert!(!msg.hidden);
+        assert_eq!(msg.hidden, HiddenState::NotHidden);
     }
 
     #[test]
@@ -147,7 +151,7 @@ mod tests {
         let out = init.process(ops);
         let msg = get_message(out.into_iter().next().unwrap());
         assert!(msg.expanded);
-        assert!(!msg.hidden);
+        assert_eq!(msg.hidden, HiddenState::NotHidden);
     }
 
     #[test]
@@ -158,7 +162,7 @@ mod tests {
         let msg = get_message(out.into_iter().next().unwrap());
         assert!(!msg.show_more);
         assert!(!msg.expanded);
-        assert!(!msg.hidden);
+        assert_eq!(msg.hidden, HiddenState::NotHidden);
     }
 
     #[test]
@@ -171,7 +175,7 @@ mod tests {
         )];
         let out = init.process(ops);
         let msg = get_message(out.into_iter().next().unwrap());
-        assert!(msg.hidden);
+        assert_eq!(msg.hidden, HiddenState::Hidden);
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         let ops = vec![make_append("th", MessageType::Thinking)];
         let out = init.process(ops);
         let msg = get_message(out.into_iter().next().unwrap());
-        assert!(!msg.hidden);
+        assert_eq!(msg.hidden, HiddenState::NotHidden);
         assert!(!msg.expanded);
     }
 
@@ -234,7 +238,11 @@ mod tests {
         )];
         let out = init.process(ops);
         let msg = get_message(out.into_iter().next().unwrap());
-        assert!(!msg.hidden, "attachment nodes should be visible");
+        assert_eq!(
+            msg.hidden,
+            HiddenState::NotHidden,
+            "attachment nodes should be visible"
+        );
         assert!(!msg.expanded, "attachment nodes should be collapsed");
         assert!(!msg.show_more, "attachment nodes should not show_more");
     }

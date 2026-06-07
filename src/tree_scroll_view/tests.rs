@@ -485,12 +485,185 @@ fn hidden_node_is_skipped_in_navigation() {
     let mut state = TreeScrollViewState::new(vec![short_msg("a"), short_msg("b"), short_msg("c")]);
     do_layout(&mut state, 80, 24);
 
-    state.set_hidden(&[1], true); // hide middle node
+    state.set_hidden(&[1], crate::tree_scroll_view::HiddenState::Hidden); // hide middle node
     do_layout(&mut state, 80, 24);
 
     state.select_next(); // [0] → should skip hidden [1] and land on [2]
     assert_eq!(state.selection_index, vec![2]);
     do_layout(&mut state, 80, 24);
+}
+
+// ── HiddenState navigation ────────────────────────────────────────────────────
+
+#[test]
+fn reveal_next_five_reveals_up_to_five_hidden() {
+    use crate::tree_scroll_view::HiddenState;
+    // 10 hidden nodes after one visible node.
+    let mut items: Vec<MessageState> = vec![short_msg("visible")];
+    for i in 0..10 {
+        items.push(short_msg(&format!("h{i}")).hidden(HiddenState::Hidden));
+    }
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.reveal_next_n_hidden(5);
+
+    // Exactly 5 should be revealed, 5 still hidden.
+    let revealed: Vec<_> = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Revealed)
+        .collect();
+    let still_hidden: Vec<_> = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Hidden)
+        .collect();
+    assert_eq!(revealed.len(), 5, "should reveal exactly 5");
+    assert_eq!(still_hidden.len(), 5, "should leave 5 hidden");
+
+    // Selection should land on the 5th revealed node.
+    assert_eq!(state.selection_index, vec![5]);
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn reveal_next_five_reveals_all_when_run_is_shorter() {
+    use crate::tree_scroll_view::HiddenState;
+    let mut items = vec![short_msg("visible")];
+    for i in 0..3 {
+        items.push(short_msg(&format!("h{i}")).hidden(HiddenState::Hidden));
+    }
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.reveal_next_n_hidden(5);
+
+    let revealed: Vec<_> = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Revealed)
+        .collect();
+    assert_eq!(revealed.len(), 3);
+    // Selection on the 3rd (last) revealed node.
+    assert_eq!(state.selection_index, vec![3]);
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn reveal_jump_forward_reveals_all_and_lands_on_next_visible() {
+    use crate::tree_scroll_view::HiddenState;
+    let mut items = vec![short_msg("first")];
+    for i in 0..4 {
+        items.push(short_msg(&format!("h{i}")).hidden(HiddenState::Hidden));
+    }
+    items.push(short_msg("after"));
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.reveal_jump_forward();
+
+    // All 4 hidden should be revealed.
+    let revealed: Vec<_> = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Revealed)
+        .collect();
+    assert_eq!(revealed.len(), 4);
+    // Selection should land on "after" (the visible node after the run).
+    assert_eq!(state.selection_index, vec![5]);
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn toggle_all_hidden_reveals_then_re_hides() {
+    use crate::tree_scroll_view::HiddenState;
+    let items = vec![
+        short_msg("visible"),
+        short_msg("h1").hidden(HiddenState::Hidden),
+        short_msg("h2").hidden(HiddenState::Hidden),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    // First call: some Hidden → reveal all.
+    state.toggle_all_hidden();
+    let hidden_count = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Hidden)
+        .count();
+    let revealed_count = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Revealed)
+        .count();
+    assert_eq!(hidden_count, 0, "after first toggle all should be Revealed");
+    assert_eq!(revealed_count, 2);
+    do_layout(&mut state, 80, 24);
+
+    // Second call: no Hidden left → hide all Revealed.
+    state.toggle_all_hidden();
+    let hidden_count2 = state
+        .items
+        .iter()
+        .filter(|n| n.hidden == HiddenState::Hidden)
+        .count();
+    assert_eq!(
+        hidden_count2, 2,
+        "after second toggle all should be Hidden again"
+    );
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn expand_reveal_children_reveals_hidden_children() {
+    use crate::tree_scroll_view::HiddenState;
+    let child_a = short_msg("ca");
+    let child_b = short_msg("cb").hidden(HiddenState::Hidden);
+    let parent = short_msg("parent")
+        .children(vec![child_a, child_b])
+        .expanded(false);
+    let mut state = TreeScrollViewState::new(vec![parent]);
+    do_layout(&mut state, 80, 24);
+
+    state.expand_reveal_children();
+
+    let parent = &state.items[0];
+    assert!(parent.expanded);
+    assert_eq!(parent.children[1].hidden, HiddenState::Revealed);
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn collapse_hide_children_re_hides_revealed_children() {
+    use crate::tree_scroll_view::HiddenState;
+    let child_a = short_msg("ca");
+    let child_b = short_msg("cb").hidden(HiddenState::Revealed);
+    let parent = short_msg("parent")
+        .children(vec![child_a, child_b])
+        .expanded(true);
+    let mut state = TreeScrollViewState::new(vec![parent]);
+    do_layout(&mut state, 80, 24);
+
+    state.collapse_hide_children();
+
+    let parent = &state.items[0];
+    assert!(!parent.expanded);
+    assert_eq!(parent.children[1].hidden, HiddenState::Hidden);
+    do_layout(&mut state, 80, 24);
+}
+
+#[test]
+fn hidden_indicator_char_encoding() {
+    use super::ui::hidden_indicator_char;
+    assert_eq!(hidden_indicator_char(0), "");
+    assert_eq!(hidden_indicator_char(1), "⠁");
+    assert_eq!(hidden_indicator_char(2), "⠃");
+    assert_eq!(hidden_indicator_char(3), "⠇");
+    assert_eq!(hidden_indicator_char(4), "⡇");
+    assert_eq!(hidden_indicator_char(5), "⣿");
+    assert_eq!(hidden_indicator_char(100), "⣿");
 }
 
 // ── resize ────────────────────────────────────────────────────────────────────
@@ -622,10 +795,7 @@ fn cycle_display_noop_on_short_text_no_children() {
     do_layout(&mut state, 80, 24);
 
     // Still sets show_more to ensure markdown styles fully show up
-    assert_eq!(
-        get_node(&state.items, &[0]).unwrap().show_more,
-        true
-    );
+    assert_eq!(get_node(&state.items, &[0]).unwrap().show_more, true);
     assert_eq!(
         get_node(&state.items, &[0]).unwrap().expanded,
         expanded_before
@@ -633,10 +803,7 @@ fn cycle_display_noop_on_short_text_no_children() {
 
     state.cycle_display();
     do_layout(&mut state, 80, 24);
-    assert_eq!(
-        get_node(&state.items, &[0]).unwrap().show_more,
-        true
-    );
+    assert_eq!(get_node(&state.items, &[0]).unwrap().show_more, true);
     assert_eq!(
         get_node(&state.items, &[0]).unwrap().expanded,
         expanded_before
@@ -844,7 +1011,7 @@ fn reset_snapshot_restores_flags_on_child_nodes() {
     let child = MessageState::new("c1")
         .message_type(MessageType::ToolResult)
         .text("result")
-        .hidden(true);
+        .hidden(crate::tree_scroll_view::HiddenState::Hidden);
     let parent = MessageState::new("p1")
         .message_type(MessageType::ToolCall)
         .text("call")
@@ -870,7 +1037,7 @@ fn reset_snapshot_restores_flags_on_child_nodes() {
     let p = state.items.iter().find(|n| n.id == "p1").unwrap();
     assert!(!p.expanded, "parent expanded=false should be restored");
     let c = p.children.iter().find(|n| n.id == "c1").unwrap();
-    assert!(c.hidden, "child hidden=true should be restored");
+    assert!(c.hidden.is_hidden(), "child hidden=true should be restored");
 }
 
 // ── advanced navigation fixture ───────────────────────────────────────────────

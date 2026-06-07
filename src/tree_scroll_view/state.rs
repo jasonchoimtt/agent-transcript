@@ -16,6 +16,25 @@ use crate::theme::Palette;
 use crate::theme::Theme;
 use crate::tree_operation::TreeOperation;
 
+// ── HiddenState ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum HiddenState {
+    #[default]
+    NotHidden,
+    /// Config-hidden; invisible to navigation and rendering.
+    Hidden,
+    /// Was `Hidden` but the user has explicitly revealed it; behaves like `NotHidden`.
+    Revealed,
+}
+
+impl HiddenState {
+    /// Returns `true` only for the `Hidden` variant (not `Revealed`).
+    pub fn is_hidden(self) -> bool {
+        self == HiddenState::Hidden
+    }
+}
+
 // ── UiState ───────────────────────────────────────────────────────────────────
 
 /// Trait for rich per-node widget state (e.g. `TableUiState`).
@@ -222,7 +241,7 @@ fn clear_heights(items: &mut [MessageState]) {
 struct NodeUiFlags {
     show_more: bool,
     expanded: bool,
-    hidden: bool,
+    hidden: HiddenState,
 }
 
 fn capture_snapshot(items: &[MessageState], map: &mut HashMap<String, NodeUiFlags>) {
@@ -263,6 +282,140 @@ fn is_ua_nav_target(n: &MessageState) -> bool {
         n.message_type,
         MessageType::UserMessage | MessageType::AgentMessage
     )
+}
+
+// ── hidden-state helpers ──────────────────────────────────────────────────────
+
+fn any_hidden_in_tree(items: &[MessageState]) -> bool {
+    items
+        .iter()
+        .any(|n| n.hidden == HiddenState::Hidden || any_hidden_in_tree(&n.children))
+}
+
+fn reveal_all_hidden(items: &mut [MessageState]) {
+    for node in items.iter_mut() {
+        if node.hidden == HiddenState::Hidden {
+            node.hidden = HiddenState::Revealed;
+            node.height = None;
+        }
+        reveal_all_hidden(&mut node.children);
+    }
+}
+
+fn hide_all_revealed(items: &mut [MessageState]) {
+    for node in items.iter_mut() {
+        if node.hidden == HiddenState::Revealed {
+            node.hidden = HiddenState::Hidden;
+            node.height = None;
+        }
+        hide_all_revealed(&mut node.children);
+    }
+}
+
+/// Collect paths of the next `n` contiguous `Hidden` nodes in DFS order after `start`.
+/// Returns the path of the last revealed node (or `None` if none found).
+fn reveal_n_hidden_forward(
+    items: &mut [MessageState],
+    start: &[usize],
+    n: usize,
+) -> Option<Vec<usize>> {
+    let paths = collect_hidden_run_forward(items, start, n);
+    if paths.is_empty() {
+        return None;
+    }
+    let last = paths.last().cloned();
+    for path in paths {
+        if let Some(node) = get_node_mut(items, &path) {
+            node.hidden = HiddenState::Revealed;
+            node.height = None;
+        }
+    }
+    last
+}
+
+/// Collect paths of the previous `n` contiguous `Hidden` nodes in DFS order before `start`.
+/// Returns the path of the first (earliest) revealed node.
+fn reveal_n_hidden_backward(
+    items: &mut [MessageState],
+    start: &[usize],
+    n: usize,
+) -> Option<Vec<usize>> {
+    let paths = collect_hidden_run_backward(items, start, n);
+    if paths.is_empty() {
+        return None;
+    }
+    let first = paths.first().cloned();
+    for path in paths {
+        if let Some(node) = get_node_mut(items, &path) {
+            node.hidden = HiddenState::Revealed;
+            node.height = None;
+        }
+    }
+    first
+}
+
+/// Walk DFS starting just after `start`, collecting paths of consecutive `Hidden`
+/// nodes (stop at first non-`Hidden` node or after collecting `limit` paths).
+fn collect_hidden_run_forward(
+    items: &[MessageState],
+    start: &[usize],
+    limit: usize,
+) -> Vec<Vec<usize>> {
+    let mut paths = Vec::new();
+    let mut cur = match TreeCursor::at(items, start.to_vec()) {
+        Some(c) => c,
+        None => return paths,
+    };
+    loop {
+        if !cur.advance_one_with(items, |_| true) {
+            break;
+        }
+        let path = cur.path().to_vec();
+        let node = match get_node(items, &path) {
+            Some(n) => n,
+            None => break,
+        };
+        if node.hidden != HiddenState::Hidden {
+            break;
+        }
+        paths.push(path);
+        if paths.len() >= limit {
+            break;
+        }
+    }
+    paths
+}
+
+fn collect_hidden_run_backward(
+    items: &[MessageState],
+    start: &[usize],
+    limit: usize,
+) -> Vec<Vec<usize>> {
+    let mut paths = Vec::new();
+    let mut cur = match TreeCursor::at(items, start.to_vec()) {
+        Some(c) => c,
+        None => return paths,
+    };
+    loop {
+        if !cur.retreat_one_with(items, |_| true) {
+            break;
+        }
+        let path = cur.path().to_vec();
+        let node = match get_node(items, &path) {
+            Some(n) => n,
+            None => break,
+        };
+        if node.hidden != HiddenState::Hidden {
+            break;
+        }
+        paths.push(path);
+        if paths.len() >= limit {
+            break;
+        }
+    }
+    // Reverse so the earliest path is first.
+    paths.reverse();
+    paths
 }
 
 fn notify_viewport_width_changed(items: &mut [MessageState]) {
@@ -323,7 +476,7 @@ pub struct MessageState {
     pub indent_children: bool,
     pub children: Vec<MessageState>,
 
-    pub hidden: bool,
+    pub hidden: HiddenState,
     /// When false, display is truncated to one line (using `brief` if set, else first line of text).
     pub show_more: bool,
     pub expanded: bool,
@@ -341,7 +494,7 @@ impl MessageState {
             data: String::new(),
             props: None,
             group: false,
-            hidden: false,
+            hidden: HiddenState::NotHidden,
             expanded: true,
             height: None,
             is_terminal: false,
@@ -412,7 +565,7 @@ impl MessageState {
         self
     }
 
-    pub fn hidden(mut self, v: bool) -> Self {
+    pub fn hidden(mut self, v: HiddenState) -> Self {
         self.hidden = v;
         self
     }
@@ -480,7 +633,7 @@ fn make_terminal_node() -> MessageState {
         data: String::new(),
         props: None,
         group: false,
-        hidden: false,
+        hidden: HiddenState::NotHidden,
         expanded: false,
         height: None,
         is_terminal: true,
@@ -1215,7 +1368,7 @@ impl TreeScrollViewState {
             let Some(node) = items.get(idx) else {
                 return false;
             };
-            if node.hidden {
+            if node.hidden.is_hidden() {
                 return false;
             }
             if i + 1 < path.len() {
@@ -1483,7 +1636,7 @@ impl TreeScrollViewState {
             node.children
                 .iter()
                 .enumerate()
-                .find(|(_, c)| !c.hidden)
+                .find(|(_, c)| !c.hidden.is_hidden())
                 .map(|(i, _)| i)
         };
         if let Some(i) = first_child_idx {
@@ -1715,10 +1868,139 @@ impl TreeScrollViewState {
         self.rectify_selection_and_top();
     }
 
-    pub fn set_hidden(&mut self, path: &[usize], hidden: bool) {
+    pub fn set_hidden(&mut self, path: &[usize], hidden: HiddenState) {
         self.at_bottom = false;
         if let Some(node) = get_node_mut(&mut self.items, path) {
             node.hidden = hidden;
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Expand the current node (no-op if already expanded).
+    pub fn expand_node(&mut self) {
+        let path = self.selection_index.clone();
+        self.expand(&path);
+        self.rectify_selection_and_top();
+    }
+
+    /// Collapse the current node.
+    pub fn collapse_node(&mut self) {
+        let path = self.selection_index.clone();
+        self.collapse(&path);
+        self.rectify_selection_and_top();
+    }
+
+    /// Expand the current node and reveal all `Hidden` direct children.
+    pub fn expand_reveal_children(&mut self) {
+        self.at_bottom = false;
+        let path = self.selection_index.clone();
+        if let Some(node) = get_node_mut(&mut self.items, &path) {
+            node.expanded = true;
+            node.height = None;
+            for child in &mut node.children {
+                if child.hidden == HiddenState::Hidden {
+                    child.hidden = HiddenState::Revealed;
+                    child.height = None;
+                }
+            }
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Collapse the current node and set all `Revealed` direct children back to `Hidden`.
+    pub fn collapse_hide_children(&mut self) {
+        self.at_bottom = false;
+        let path = self.selection_index.clone();
+        if let Some(node) = get_node_mut(&mut self.items, &path) {
+            node.expanded = false;
+            node.height = None;
+            for child in &mut node.children {
+                if child.hidden == HiddenState::Revealed {
+                    child.hidden = HiddenState::Hidden;
+                    child.height = None;
+                }
+            }
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Toggle all hidden nodes globally: if any `Hidden` nodes exist, reveal all;
+    /// otherwise set all `Revealed` nodes back to `Hidden`.
+    pub fn toggle_all_hidden(&mut self) {
+        self.at_bottom = false;
+        let has_hidden = any_hidden_in_tree(&self.items);
+        if has_hidden {
+            reveal_all_hidden(&mut self.items);
+        } else {
+            hide_all_revealed(&mut self.items);
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Reveal the next `n` contiguous `Hidden` nodes in DFS order after the
+    /// current selection, and select the last one revealed.
+    pub fn reveal_next_n_hidden(&mut self, n: usize) {
+        self.at_bottom = false;
+        let start = self.selection_index.clone();
+        let revealed = reveal_n_hidden_forward(&mut self.items, &start, n);
+        if let Some(last_path) = revealed {
+            self.selection_index = last_path;
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Reveal the previous `n` contiguous `Hidden` nodes in DFS order before the
+    /// current selection, and select the first one revealed.
+    pub fn reveal_prev_n_hidden(&mut self, n: usize) {
+        self.at_bottom = false;
+        let start = self.selection_index.clone();
+        let revealed = reveal_n_hidden_backward(&mut self.items, &start, n);
+        if let Some(first_path) = revealed {
+            self.selection_index = first_path;
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Reveal ALL contiguous `Hidden` nodes following the current selection and
+    /// move to the first visible node after the revealed run.
+    pub fn reveal_jump_forward(&mut self) {
+        self.at_bottom = false;
+        let start = self.selection_index.clone();
+        let revealed = collect_hidden_run_forward(&self.items, &start, usize::MAX);
+        // Apply reveals.
+        for path in &revealed {
+            if let Some(node) = get_node_mut(&mut self.items, path) {
+                node.hidden = HiddenState::Revealed;
+                node.height = None;
+            }
+        }
+        // Jump to the first visible node AFTER the revealed run.
+        let jump_from = revealed.last().unwrap_or(&start).clone();
+        if let Some(mut cur) = TreeCursor::at(&self.items, jump_from)
+            && cur.advance(&self.items, nonzero_height)
+        {
+            self.selection_index = cur.path().to_vec();
+        }
+        self.rectify_selection_and_top();
+    }
+
+    /// Reveal ALL contiguous `Hidden` nodes preceding the current selection and
+    /// move to the last visible node before the revealed run.
+    pub fn reveal_jump_backward(&mut self) {
+        self.at_bottom = false;
+        let start = self.selection_index.clone();
+        let revealed = collect_hidden_run_backward(&self.items, &start, usize::MAX);
+        for path in &revealed {
+            if let Some(node) = get_node_mut(&mut self.items, path) {
+                node.hidden = HiddenState::Revealed;
+                node.height = None;
+            }
+        }
+        let jump_from = revealed.first().unwrap_or(&start).clone();
+        if let Some(mut cur) = TreeCursor::at(&self.items, jump_from)
+            && cur.retreat(&self.items, nonzero_height)
+        {
+            self.selection_index = cur.path().to_vec();
         }
         self.rectify_selection_and_top();
     }
@@ -2044,6 +2326,15 @@ impl TreeScrollViewState {
             TreeAction::SelectNextTurnEnd => self.select_next_turn_end(),
             TreeAction::SelectPrevTurnStart => self.select_prev_turn_start(),
             TreeAction::SelectPrevTurnEnd => self.select_prev_turn_end(),
+            TreeAction::OpenNode => self.expand_node(),
+            TreeAction::CloseNode => self.collapse_node(),
+            TreeAction::OpenRevealHidden => self.expand_reveal_children(),
+            TreeAction::CloseHideRevealed => self.collapse_hide_children(),
+            TreeAction::RevealNextFive => self.reveal_next_n_hidden(5),
+            TreeAction::RevealPrevFive => self.reveal_prev_n_hidden(5),
+            TreeAction::RevealJumpForward => self.reveal_jump_forward(),
+            TreeAction::RevealJumpBackward => self.reveal_jump_backward(),
+            TreeAction::ToggleAllHidden => self.toggle_all_hidden(),
             TreeAction::TerminalActivate
             | TreeAction::Quit
             | TreeAction::None

@@ -61,7 +61,12 @@ async fn drain_transform_print(
     }
     eprintln!("{} raw ops loaded", raw_ops.len());
 
-    let mut transforms = build_transforms(&config.transforms, provider, None, &config.widgets.tool_result.file_delta);
+    let mut transforms = build_transforms(
+        &config.transforms,
+        provider,
+        None,
+        &config.widgets.tool_result.file_delta,
+    );
     let ops = apply_batch(raw_ops, &mut transforms);
     eprintln!("{} ops after transforms", ops.len());
 
@@ -112,7 +117,7 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
     if node.group {
         flags.push("group");
     }
-    if node.hidden {
+    if node.hidden.is_hidden() {
         flags.push("hidden");
     }
 

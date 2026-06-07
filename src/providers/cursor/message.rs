@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::TimeZone as _;
 
 use crate::tree_operation::TreeOperation;
-use crate::tree_scroll_view::state::{MessageState, MessageType};
+use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
 pub struct ParseState {
     pub turn_n: usize,
@@ -138,7 +138,11 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 .text(text)
                 .data(obj.to_string())
                 .message_type(MessageType::UserMessage)
-                .hidden(is_injected);
+                .hidden(if is_injected {
+                    HiddenState::Hidden
+                } else {
+                    HiddenState::NotHidden
+                });
             if is_summary {
                 user_msg = user_msg.tag("summary").brief("[Conversation summary]");
             }
@@ -676,7 +680,7 @@ mod tests {
             _ => None,
         });
         assert!(
-            user_msg.unwrap().hidden,
+            user_msg.unwrap().hidden.is_hidden(),
             "injected user message should be hidden"
         );
     }
@@ -697,7 +701,7 @@ mod tests {
             _ => None,
         });
         assert!(
-            !user_msg.unwrap().hidden,
+            !user_msg.unwrap().hidden.is_hidden(),
             "real user message should not be hidden"
         );
     }
@@ -1004,7 +1008,10 @@ mod tests {
         let msg = user_msg.unwrap();
         assert_eq!(msg.tag.as_deref(), Some("summary"));
         assert_eq!(msg.brief.as_deref(), Some("[Conversation summary]"));
-        assert!(!msg.hidden, "summary message should not be hidden");
+        assert!(
+            !msg.hidden.is_hidden(),
+            "summary message should not be hidden"
+        );
     }
 
     #[test]

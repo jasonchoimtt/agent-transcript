@@ -11,6 +11,17 @@ use crate::terminal::placeholder::PlaceholderWidget;
 use crate::terminal::ui::TerminalWidget;
 use crate::theme::Theme;
 
+pub fn hidden_indicator_char(count: usize) -> &'static str {
+    match count {
+        0 => "",
+        1 => "⠁",
+        2 => "⠃",
+        3 => "⠇",
+        4 => "⡇",
+        _ => "⣿",
+    }
+}
+
 pub struct TreeScrollView<'a> {
     pub terminal: TerminalPaneRef<'a>,
     pub scrollback_available: u16,
@@ -166,6 +177,19 @@ impl StatefulWidget for TreeScrollView<'_> {
                         interaction: selected && message_interaction,
                     }
                     .render(widget_area, buf);
+
+                    // Braille indicator in the padding row when hidden nodes follow.
+                    if last_row_is_pad {
+                        let hidden_count = cur.count_hidden_to_next(&state.items);
+                        let indicator = hidden_indicator_char(hidden_count);
+                        if !indicator.is_empty() {
+                            let pad_y = widget_area.y + visible_rows - 1;
+                            if let Some(cell) = buf.cell_mut((area.x + 1, pad_y)) {
+                                let muted = theme.palette.muted;
+                                cell.set_symbol(indicator).set_fg(muted);
+                            }
+                        }
+                    }
                 }
 
                 y += visible_rows;

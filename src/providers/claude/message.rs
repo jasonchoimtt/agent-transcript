@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::tree_operation::TreeOperation;
-use crate::tree_scroll_view::state::{MessageState, MessageType};
+use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
 #[derive(Default)]
 pub struct ParseState {
@@ -416,7 +416,11 @@ fn emit_user_message(
             .text(text)
             .data(obj.to_string())
             .message_type(MessageType::UserMessage)
-            .hidden(is_meta);
+            .hidden(if is_meta {
+                HiddenState::Hidden
+            } else {
+                HiddenState::NotHidden
+            });
         if let Some(tag) = xml_tag {
             node = node.tag(tag);
         }
@@ -890,7 +894,7 @@ mod tests {
             }
             _ => None,
         });
-        assert!(!user_msg.unwrap().hidden);
+        assert!(!user_msg.unwrap().hidden.is_hidden());
     }
 
     #[test]
@@ -913,7 +917,7 @@ mod tests {
             }
             _ => None,
         });
-        assert!(user_msg.unwrap().hidden);
+        assert!(user_msg.unwrap().hidden.is_hidden());
     }
 
     #[test]

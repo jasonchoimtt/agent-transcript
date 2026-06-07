@@ -34,6 +34,17 @@ pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
                 ("Space", "Cycle display / toggle show-more"),
                 ("r", "Open raw data view for selected message"),
                 ("Enter", "Toggle expand"),
+                ("o / c", "Expand / collapse selected node"),
+                (
+                    "O / C",
+                    "Expand+reveal hidden children / collapse+hide revealed",
+                ),
+                ("J / K", "Reveal next / prev 5 hidden nodes"),
+                (
+                    "zJ / zK",
+                    "Reveal all hidden and jump past run (fwd / back)",
+                ),
+                ("zh", "Reveal all hidden nodes; again to hide all revealed"),
                 ("Y / yy", "Copy markdown"),
                 ("yt", "Copy plain text"),
                 ("yr", "Copy raw"),
