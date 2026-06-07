@@ -185,6 +185,8 @@ pub enum DiffLineKind {
     Removed,
     /// Added line in new-version-only mode (removed lines hidden). Rendered with a "changed" color.
     Changed,
+    /// Removed line in new-version-only mode: advances `old_n` but is not rendered.
+    RemovedHidden,
     Context,
 }
 
@@ -199,12 +201,13 @@ pub struct DiffLine {
 
 /// Build the list of `DiffLine`s to render for a single hunk.
 ///
-/// When `show_full = false` (non-expanded mode):
-/// - ≤10 changed lines → full diff
-/// - >10 changed lines → new-version-only (strip removed lines)
-///   - if >30 added lines: truncate to first 30, returns a trailing ellipsis marker
+/// Walks the hunk lines splitting them into context runs and change blocks (contiguous
+/// runs of `+`/`-` lines). Each change block independently decides between full-diff and
+/// new-version-only mode:
+/// - ≤10 lines in block, or pure deletion (no adds) → full diff
+/// - >10 lines with adds → new-version mode (`RemovedHidden` + `Changed`; cap 30)
 ///
-/// `context_limit` trims context lines to at most that many per block.
+/// `context_limit` trims context lines to at most that many per change-block boundary.
 /// `None` means keep all context.
 ///
 /// Returns `(lines, hidden_count)` where `hidden_count > 0` means truncation occurred.
@@ -213,69 +216,84 @@ pub fn build_diff_lines(
     show_full: bool,
     context_limit: Option<usize>,
 ) -> (Vec<DiffLine>, usize) {
-    let changed_count = hunk
-        .lines
-        .iter()
-        .filter(|l| l.starts_with('+') || l.starts_with('-'))
-        .count();
+    // Walk hunk lines splitting into context runs and change blocks. Decide
+    // full-diff vs new-version independently for each change block.
+    let mut raw_lines: Vec<(DiffLineKind, &str)> = Vec::new();
+    let lines = &hunk.lines;
+    let mut i = 0;
 
-    let use_full_diff = show_full || changed_count <= 10;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix(' ') {
+            raw_lines.push((DiffLineKind::Context, rest));
+            i += 1;
+            continue;
+        }
 
-    let raw_lines: Vec<(DiffLineKind, &str)> = hunk
-        .lines
-        .iter()
-        .filter_map(|l| {
-            if let Some(rest) = l.strip_prefix('+') {
-                let kind = if use_full_diff {
+        // Collect a contiguous change block (+/- lines).
+        let block_start = i;
+        while i < lines.len() && !lines[i].starts_with(' ') {
+            i += 1;
+        }
+        let block = &lines[block_start..i];
+
+        let added_count = block.iter().filter(|l| l.starts_with('+')).count();
+        let use_full = show_full || block.len() <= 10 || added_count == 0;
+
+        for line in block {
+            if let Some(rest) = line.strip_prefix('+') {
+                let kind = if use_full {
                     DiffLineKind::Added
                 } else {
                     DiffLineKind::Changed
                 };
-                Some((kind, rest))
-            } else if let Some(rest) = l.strip_prefix('-') {
-                if use_full_diff {
-                    Some((DiffLineKind::Removed, rest))
+                raw_lines.push((kind, rest));
+            } else if let Some(rest) = line.strip_prefix('-') {
+                let kind = if use_full {
+                    DiffLineKind::Removed
                 } else {
-                    None
-                }
-            } else if let Some(rest) = l.strip_prefix(' ') {
-                Some((DiffLineKind::Context, rest))
-            } else {
-                None
+                    DiffLineKind::RemovedHidden
+                };
+                raw_lines.push((kind, rest));
             }
-        })
-        .collect();
+        }
+    }
 
-    // Count added lines to decide whether to truncate (new-version mode only).
-    let added_count = raw_lines
+    // Filter context runs if a limit is set.
+    let filtered = apply_context_limit(&raw_lines, context_limit);
+
+    // Truncate Changed lines at 30 total.
+    let total_changed = filtered
         .iter()
-        .filter(|(k, _)| matches!(k, DiffLineKind::Added | DiffLineKind::Changed))
+        .filter(|(k, _)| *k == DiffLineKind::Changed)
         .count();
-    let truncate_at = if !use_full_diff && added_count > 30 {
+    let truncate_at = if total_changed > 30 {
         Some(30usize)
     } else {
         None
     };
 
-    // Filter context runs if a limit is set.
-    // Strategy: within each "context block" (consecutive context lines between change blocks),
-    // keep at most `context_limit` from the start and end of that block.
-    let filtered = apply_context_limit(&raw_lines, context_limit);
-
     // Assign line numbers and apply truncation.
     let mut old_n = hunk.old_start;
     let mut new_n = hunk.new_start;
-    let mut added_seen = 0usize;
+    let mut changed_seen = 0usize;
+    let mut truncated = 0usize;
     let mut result = Vec::new();
 
     for (kind, content) in &filtered {
+        // RemovedHidden advances old_n but is not rendered.
+        if *kind == DiffLineKind::RemovedHidden {
+            old_n += 1;
+            continue;
+        }
+
         if let Some(limit) = truncate_at
-            && matches!(kind, DiffLineKind::Added | DiffLineKind::Changed)
+            && *kind == DiffLineKind::Changed
         {
-            if added_seen >= limit {
-                break;
+            if changed_seen >= limit {
+                truncated += 1;
+                continue;
             }
-            added_seen += 1;
+            changed_seen += 1;
         }
 
         let (old_num, new_num) = match kind {
@@ -296,6 +314,7 @@ pub fn build_diff_lines(
                 new_n += 1;
                 (None, n)
             }
+            DiffLineKind::RemovedHidden => unreachable!(),
         };
 
         result.push(DiffLine {
@@ -306,8 +325,7 @@ pub fn build_diff_lines(
         });
     }
 
-    let hidden = filtered.len() - result.len();
-    (result, hidden)
+    (result, truncated)
 }
 
 fn apply_context_limit<'a>(
@@ -568,6 +586,82 @@ mod tests {
                 .count(),
             30
         );
+    }
+
+    #[test]
+    fn pure_deletion_shows_removed_lines() {
+        // >10 removed lines with no added lines must still display (not be hidden).
+        let lines: Vec<&str> = (0..12).flat_map(|_| ["-removed"].into_iter()).collect();
+        let hunk = make_hunk(&lines);
+        let (result, _) = build_diff_lines(&hunk, false, None);
+        assert_eq!(
+            result
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Removed)
+                .count(),
+            12
+        );
+    }
+
+    #[test]
+    fn changed_mode_context_line_numbers_are_correct() {
+        // Force new-version mode by providing a large changed_count via show_full=false
+        // with 11+ changes. Here we have only 2 changed lines (<=10), so use a bigger hunk
+        // to trigger new-version mode. Build one with 6 pairs (12 changed).
+        let mut big_lines = vec![" ctx".to_string()];
+        for _ in 0..6 {
+            big_lines.push("-old".to_string());
+            big_lines.push("+new".to_string());
+        }
+        big_lines.push(" after".to_string());
+        let big_hunk = PatchHunk {
+            lines: big_lines,
+            old_start: 10,
+            old_lines: 8, // 1 ctx + 6 removed + 1 after
+            new_start: 10,
+            new_lines: 8, // 1 ctx + 6 added + 1 after
+        };
+        let (result, _) = build_diff_lines(&big_hunk, false, None);
+        // Context line after the changed block: old should be 10+1+6=17, new should be 10+1+6=17
+        let after = result.last().unwrap();
+        assert_eq!(after.kind, DiffLineKind::Context);
+        assert_eq!(after.old_num, Some(17));
+        assert_eq!(after.new_num, Some(17));
+    }
+
+    #[test]
+    fn mixed_blocks_pure_deletion_visible() {
+        // One hunk containing: a pure-deletion block (11 lines), context, and a replacement block.
+        // With per-hunk logic the deletion block was hidden (hunk had adds overall).
+        // With per-block logic each block is decided independently.
+        let mut lines: Vec<&str> = Vec::new();
+        for _ in 0..11 {
+            lines.push("-deleted");
+        }
+        lines.push(" context");
+        for _ in 0..6 {
+            lines.push("-old");
+            lines.push("+new");
+        }
+        let hunk = make_hunk(&lines);
+        let (result, _) = build_diff_lines(&hunk, false, None);
+
+        // Block 1: 11 removes, 0 adds → pure deletion → full diff → Removed
+        let removed = result
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Removed)
+            .count();
+        assert_eq!(removed, 11, "pure-deletion block must remain visible");
+
+        // Block 2: 12 lines, 6 adds → >10 and adds present → new-version mode → Changed
+        let changed = result
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Changed)
+            .count();
+        assert_eq!(changed, 6);
+
+        // No line should be RemovedHidden (it must not escape the builder)
+        assert!(result.iter().all(|l| l.kind != DiffLineKind::RemovedHidden));
     }
 
     #[test]

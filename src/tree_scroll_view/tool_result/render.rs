@@ -442,6 +442,7 @@ fn diff_line_styles(dl: &DiffLine, palette: &Palette, style: &ToolResultStyle) -
             style.diff_context.to_style(palette),
             style.line_num.to_style(palette),
         ),
+        DiffLineKind::RemovedHidden => unreachable!("RemovedHidden must not reach rendering"),
     }
 }
 
