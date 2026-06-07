@@ -1,0 +1,4 @@
+[?25l[m[H[J  $ sleep 10 exit 0[3;1H  $ sleep 10 exit 0[5;1H [48;5;253m                                                                                            
+[m [48;5;253m run sleep 10                                                                               
+[m [48;5;253m                                                                                            [9;1H[m  $ sleep 10 4.9s[11;1H [32m⠣⠄[m [1mRunning[m  15 tokens[13;1H [48;5;254m                                                                                            
+[m [48;5;254m → [7mA[27mdd a follow-up                                                           ctrl+c to stop [m

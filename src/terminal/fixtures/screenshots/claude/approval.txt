@@ -1,0 +1,24 @@
+[?25l[m[H[J[38;5;244mYou are at: /home/agent/workspaces/myprj @ myprj-00000000
+[38;5;56mmyprj/00000000:myprj 2351 $ [32mclaude
+[38;5;174m ▐[48;5;16m▛███▜[49m▌[3C[39;1mClaude[CCode[C[38;5;241;22mv2.1.119
+[38;5;174m▝▜[48;5;16m█████[49m▛▘[2C[38;5;241mSonnet[C4.6[Cwith[Cmedium[Ceffort[C·[CClaude[CPro
+[38;5;174m [C▘▘[C▝▝[4C[38;5;241m~/workspaces/myprj[7;1H[38;5;199;48;5;231m! [38;5;16msleep 10[39m                                                                                    
+[38;5;241;49m  ⎿  [m(Bash completed[Cwith[Cno[Coutput)
+                                                                                              
+[38;5;199;48;5;231m! [38;5;16msleep 10[39m                                                                                    
+[38;5;241;49m  ⎿  [m(Bash completed with no output)                                                          
+                                                                                              
+[38;5;248;48;5;255m❯ [38;5;16mrun sleep 10[39m                                                                                
+[m                                                                                              
+[38;5;65m●[m [1mBash[m(sleep 10)                                                                              
+[38;5;241m  ⎿  (No output)[m                                                                              
+                                                                                              
+[38;5;16m●[m Done.                        
+                                                                                              
+[38;5;248;48;5;255m❯ [38;5;16mappend "Hello, World!" to ~/.claude/CLAUDE.md[39m                                               
+[m                                                                                              
+[38;5;241m●[m Reading [1m1[m file… [38;5;241m(ctrl+o to expand)[m                                                          
+[38;5;241m  ⎿  ~/.claude/CLAUDE.md[m                                                                      
+                                                                                              
+[38;5;105m──────────────────────────────────────────────────────────────────────────────────────────────
+[m [38;5;105;1mRead file[m                                                                                    [27;3H                                                                          [28;3HRead(~/.claude/CLAUDE.md)              [30;2HDo[Cyou[Cwant[Cto[Cproceed?[31;2H[38;5;105m❯[C[38;5;241m1.[C[38;5;105mYes[32;4H[38;5;241m2.[C[mYes,[Callow[Creading[Cfrom[C[1m.claude/[C[mduring[Cthis[Csession[33;4H[38;5;241m3.[C[mNo[35;2H[38;5;241mEsc[Cto[Ccancel[C·[CTab[Cto[Camend[31;2H[m

@@ -1,0 +1,15 @@
+[?25l[m[H[J
+  Cursor Agent
+  v0000.00.00-0000000
+  Use /plan to plan execution and reach the right outcome faster.[6;1H [48;5;253m                                                                                        
+[m [48;5;253m hi                                                                                     
+[m [48;5;253m                                                                                        [10;1H[m  Hi — what would you like to work on?[12;1H  I see you're in [1magent-transcript[m (the Rust TUI for agent session transcripts), with
+  local changes in [38;5;103msrc/app/keys.rs[m, [38;5;103msrc/app/mod.rs[m, and an untracked [38;5;103mscripts/[m folder.
+  I can help with those, something else in the repo, or a general question.[16;1H  [1mSources:[m [38;5;103mAGENTS.md[m (project overview); git status from session start
+  ([38;5;103msrc/app/keys.rs[m, [38;5;103msrc/app/mod.rs[m, [38;5;103mscripts/[m).[19;1H [48;5;253m                                                                                        
+[m [48;5;253m hiya                                                                                   
+[m [48;5;253m                                                                                        [23;1H[m  Hiya — what can I help you with today?[25;1H[38;5;229m──────────────────────────────────────────────────────────────────────────────────────────
+[m [38;5;229;1mRewind
+[m Pick a past turn to rewind to. Your files and conversation revert to the state right
+ before that turn — the selected turn and everything after are permanently discarded.[30;1H [38;5;229m  [90m1m[m     hiya                                                                [90mno changes
+[m [38;5;229m→ now[m    [38;5;229m(current)[m                                                                 [90mHEAD[33;1H[m [3mEnter details   Shift+Enter restore   ↑/↓ move   Esc exit[35;1H[m>[?1l[?2004l]0;Greeting Bot

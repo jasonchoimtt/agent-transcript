@@ -1,0 +1,6 @@
+{
+  "*.rs": [
+    "cargo fmt --",
+    "bash -c 'cargo clippy --all-targets'"
+  ]
+}

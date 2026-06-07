@@ -1,0 +1,4 @@
+[?25l[m[H[J[38;5;56mmyprj/00000000:myprj 2355 $ [32magent[4;1H[m  Cursor Agent
+  v2026.05.01-eea359f[9;1H [48;5;254m                                                                                            
+[m [48;5;254m → [7mP[27mlan, search, build anything                                                             
+[m [48;5;254m                                                                                            [13;1H[m  [90mCtx: 0[m | [90mTurn: -[m | [33m(+0,-0)[m | [35m⎇ myprj/00000000*[m | [36mComposer 2[m | No plan

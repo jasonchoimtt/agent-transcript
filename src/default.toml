@@ -1,0 +1,168 @@
+[agents.claude]
+binary = "claude"
+extra_args = []
+
+[agents.cursor]
+binary = "agent"
+extra_args = []
+
+[transforms.ui_initializer.default]
+expanded = true
+show_more = false
+
+[transforms.ui_initializer.types.UserMessage]
+expanded = true
+show_more = true
+tags.attachment = { expanded = false, show_more = false }
+
+[transforms.ui_initializer.types.AgentMessage]
+expanded = true
+show_more = true
+
+[transforms.ui_initializer.types.ToolCall]
+expanded = false
+show_more = false
+tags.error = { expanded = true }
+
+[transforms.ui_initializer.types.ToolResult]
+expanded = false
+show_more = false
+
+[transforms.ui_initializer.types.Thinking]
+expanded = false
+show_more = false
+tags.redacted = { hidden = true }
+
+[transforms.ui_initializer.types.Container]
+expanded = true
+show_more = false
+
+[transforms.ui_initializer.types.TaskSummary]
+expanded = true
+show_more = false
+
+[transforms.ui_initializer.types.System]
+expanded = false
+show_more = false
+
+[transforms.markdown_splitter]
+enabled = true
+types = ["AgentMessage"]
+
+[transforms.table_converter]
+enabled = true
+
+[[transforms.tool_grouper.default_groups]]
+name = "File reads"
+tools = ["Read", "Glob", "Grep", "LS"]
+min_count = 2
+expanded = false
+shorten_as_glob = true
+
+[[transforms.tool_grouper.default_groups]]
+name = "File writes"
+tools = ["Write", "Edit", "MultiEdit", "StrReplace"]
+min_count = 2
+expanded = false
+shorten_as_glob = true
+
+[[transforms.tool_grouper.default_groups]]
+name = "Shell commands"
+tools = ["Bash", "Shell", "Await"]
+min_count = 2
+expanded = false
+
+#########################
+# Tool formatter - Cursor
+#########################
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Read"]
+template = "{{path|path}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Write", "StrReplace"]
+template = "{{path|path}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Delete"]
+template = "{{path|path}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Shell"]
+template = "{{command}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Await"]
+template = ""
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["Glob"]
+template = "{{glob_pattern}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["WebFetch"]
+template = "{{url}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["cursor"]
+tools = ["WebSearch"]
+template = "{{search_term}}"
+
+#########################
+# Tool formatter - Claude
+#########################
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["Read"]
+template = "{{file_path|path}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["Write", "Edit"]
+template = "{{file_path|path}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["Bash"]
+template = "{{command}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["WebFetch"]
+template = "{{url}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["WebSearch"]
+template = "{{query}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["Task", "Agent"]
+template = "{{description}}"
+
+[[transforms.tool_formatter.default_rules]]
+providers = ["claude"]
+tools = ["Skill"]
+template = "{{skill}}"
+
+[[transforms.tool_formatter.default_rules]]
+tools = ["Grep"]
+template = "{{pattern}}"
+
+[[transforms.tool_formatter.default_rules]]
+tools = ["Glob"]
+template = "{{pattern}}"
+
+[[transforms.tool_formatter.default_rules]]
+tools = ["LS"]
+template = "{{path|path}}"

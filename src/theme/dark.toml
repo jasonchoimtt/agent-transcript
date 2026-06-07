@@ -1,0 +1,16 @@
+[palette]
+primary       = [100, 220, 130]   # bright green
+primary_light = [160, 245, 170]   # pale green, used as selection background
+accent        = [100, 220, 240]   # bright cyan
+accent_light  = [180, 245, 250]   # light cyan
+fg            = "Reset"
+bg            = "Reset"
+muted         = [150, 150, 150]   # medium gray
+
+[palette.custom]
+error = [205, 92, 92]
+json_key = [156, 220, 254]
+json_string = [152, 195, 121]
+json_number = [209, 154, 102]
+json_bool_null = [86, 156, 214]
+magenta = "Magenta"

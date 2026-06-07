@@ -1,0 +1,7 @@
+{
+  "name": "agent-transcript",
+  "private": true,
+  "scripts": {
+    "prepare": "husky"
+  }
+}

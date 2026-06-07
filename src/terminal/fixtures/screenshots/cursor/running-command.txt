@@ -1,0 +1,3 @@
+[?25l[m[H[J  $ sleep 10 exit 0[3;1H  $ sleep 10 Running…[7;1H [48;5;254m                                                                                            
+[m [48;5;254m → [7mA[27mdd a follow-up                                                           ctrl+c to stop 
+[m [48;5;254m                                                                                            [11;1H[m  [90mCtx: 0[m | [90mTurn: 1s[m | [33m(+10,-1)[m | [35m⎇ myprj/00000000*+[m | [36mComposer 2[m | No plan

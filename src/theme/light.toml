@@ -1,0 +1,16 @@
+[palette]
+primary       = [0, 100, 0]       # dark green (forest green darkened for light bg)
+primary_light = [180, 230, 180]   # soft green highlight, used as selection background
+accent        = [0, 112, 112]     # dark teal (replaces bright cyan)
+accent_light  = [0, 140, 140]     # medium teal
+fg            = "Reset"
+bg            = "Reset"
+muted         = [120, 120, 120]   # medium gray
+
+[palette.custom]
+error         = [180, 30, 30]     # deep red
+json_key      = [0, 70, 180]      # deep blue
+json_string   = [0, 120, 60]      # dark green
+json_number   = [180, 80, 0]      # dark orange
+json_bool_null = [0, 0, 200]      # strong blue
+magenta       = [160, 0, 160]     # dark magenta

@@ -1,0 +1,5 @@
+{
+  "name": "agent-transcript",
+  "description": "Session detection hook for agent-transcript",
+  "version": "1.0.0"
+}

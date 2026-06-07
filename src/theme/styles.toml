@@ -1,0 +1,65 @@
+[user_message]
+default = { indicator = "❯" }
+
+[user_message.tag_styles]
+bash-input           = { indicator = "!", indicator_style = { fg = "magenta" } }
+local-command-stdout = { indicator = "→", indicator_style = { fg = "muted" } }
+bash-stdout          = { indicator = "→", indicator_style = { fg = "muted" } }
+attachment           = { indicator = " ", content = { dim = true } }
+
+[agent_message]
+indicator = "●"
+uses_markdown = true
+
+[thinking]
+content = { dim = true, italic = true }
+
+[tool_call]
+show_params_in_brief  = true
+indicator             = "●"
+name                  = { fg = "accent" }
+params                = { fg = "muted" }
+error_indicator_style = { fg = "error" }
+
+[tool_result]
+indicator             = "→"
+content               = { dim = true }
+indicator_style       = { fg = "muted" }
+error_indicator_style = { fg = "error" }
+
+[task_summary] # all defaults
+
+[container]
+default = { content = { fg = "muted" } }
+
+[container.tag_styles]
+agent-turn = { content = { fg = "muted", underlined = true } }
+user-turn  = { content = { fg = "muted", underlined = true } }
+
+[selection]
+indicator = { fg = "primary" }
+
+[system]
+content = { dim = true }
+
+[json]
+key       = { fg = "json_key" }
+string    = { fg = "json_string" }
+number    = { fg = "json_number" }
+bool_null = { fg = "json_bool_null" }
+container = { dim = true }
+
+[table]
+indicator        = "▦"
+border           = { fg = "muted" }
+border_selected  = { fg = "primary" }
+header           = { bold = true }
+cell_selected    = { bg = "primary_light" }
+scroll_indicator = { fg = "muted", dim = true }
+indicator_style  = { fg = "muted" }
+
+[other.styles]
+label    = { content = { fg = "accent", bold = true } }
+value    = { content = { dim = true } }
+category = { content = { fg = "accent", bold = true } }
+shortcut = {}

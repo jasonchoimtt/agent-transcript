@@ -1,0 +1,21 @@
+[?25l[m[H[J
+  Cursor Agent
+  v2026.05.01-eea359f
+  hint: /auto-run to skip all approvals[6;1H [48;5;253m                                                                                            
+[m [48;5;253m run sudo echo hi                                                                           
+[m [48;5;253m                                                                                            [10;1H[m  $ sudo echo hi 1.2s
+    hi[13;1H [48;5;253m                                                                                            
+[m [48;5;253m fetch example.com                                                                          
+[m [48;5;253m                                                                                            [17;1H[m  [37m [m [1mWebFetch[m https://example.com[19;1H  Fetched [1mhttps://example.com[m. It’s IANA’s placeholder “Example Domain” page: short text
+  explaining the domain is for documentation examples, plus a link to [38;5;32;4mLearn more[m 
+  (https://iana.org/domains/example).[23;1H  [1mEvidence:[m Content retrieved via WebFetch from [38;5;103mhttps://example.com[m (IANA Example Domain
+  page).[26;1H [48;5;253m                                                                                            
+[m [48;5;253m fetch example.com again                                                                    
+[m [48;5;253m                                                                                            [31;1H[m ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+ │ [36m🌐 [39;1mWeb Fetch: [mhttps://example.com                                                        │
+ └──────────────────────────────────────────────────────────────────────────────────────────┘[35;1H [48;5;254m                                                                                            
+[m [48;5;254m [33mAllow this web fetch?[39m                                                                      
+[m [48;5;254m  [30m→ [1mFetch[22m (y)[39m                                                                               
+[m [48;5;254m  [30m  Always allow example.com (tab)[39m                                                          
+[m [48;5;254m  [30m  Skip (esc or n)[39m                                                                         
+[m [48;5;254m                                                                                            [42;1H[m

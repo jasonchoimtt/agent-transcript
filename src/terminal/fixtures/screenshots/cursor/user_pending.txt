@@ -1,0 +1,9 @@
+[?25l[m[H[J
+  Cursor Agent
+  v0000.00.00-0000000
+  Hit shift+tab to enable Plan Mode for large or complex changes.[6;1H [48;5;253m                                                                                        
+[m [48;5;253m hiya                                                                                   
+[m [48;5;253m                                                                                        [10;1H[m [32m⠠⠜[m [1mComposing[12;1H[m [48;5;254m                                                                                        
+[m [48;5;254m → Add a follow-up                                                       ctrl+c to stop 
+[m [48;5;254m                                                                                        [16;1H[m  [90mCtx: 17.2k[m | [90mTurn: 0s[m | [33m(+47,-1)[m | [35m⎇ xxxxx/00000000*+[m | [36mComposer 2.5[m | No plan
+>[?1l[?2004h]0;Hiya There
