@@ -105,6 +105,7 @@ impl App {
                 tree_state: &self.tree_state,
                 session_label: self.terminal.session_label(),
                 collapsed_crop: self.terminal.live_ts().and_then(|ts| ts.collapsed_crop),
+                pending_app_key: self.pending_app_key,
                 primary: self.theme.palette.primary,
                 muted: self.theme.palette.muted,
             }

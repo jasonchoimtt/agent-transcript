@@ -255,6 +255,47 @@ impl App {
             return;
         }
 
+        // Resolve app-level composite keys (prefix `!`).
+        if self.pending_app_key == Some('!') {
+            self.pending_app_key = None;
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // !l: open reader log view.
+                        self.data_view = Some(DataViewState::from_nodes(build_reader_log_nodes(
+                            &self.log_buffer,
+                        )));
+                    }
+                    KeyCode::Char('L') => {
+                        // !L: enable debug logging to file.
+                        if self.debug_writer.is_enabled() {
+                            self.flash_message = Some((
+                                format!("Already writing logs to {}", crate::logging::LOG_PATH),
+                                false,
+                                std::time::Instant::now(),
+                            ));
+                        } else {
+                            self.confirm_prompt = Some(ConfirmKind::DebugLog);
+                        }
+                    }
+                    KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // !s: toggle status bar debug mode.
+                        self.status_bar_debug = !self.status_bar_debug;
+                    }
+                    // !r: restart reader (with confirm).
+                    KeyCode::Char('r')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.last_session.is_some() =>
+                    {
+                        self.confirm_prompt = Some(ConfirmKind::ReaderRestart);
+                    }
+                    _ => {}
+                }
+            }
+            // Always consume the second key (don't fall through).
+            return;
+        }
+
         if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('x')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -284,9 +325,6 @@ impl App {
         {
             // Esc: activate terminal (go back to chat).
             self.activate_terminal();
-        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('D') {
-            // Shift-D: toggle status bar debug mode.
-            self.status_bar_debug = !self.status_bar_debug;
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('r') {
             // r: open raw data view for selected message.
             let data = self.tree_state.selected_data().to_owned();
@@ -297,16 +335,9 @@ impl App {
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('?') {
             // ?: open key shortcuts view.
             self.data_view = Some(DataViewState::from_nodes(build_key_shortcuts_nodes()));
-        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('R') {
-            // Shift-R: restart reader (with confirm).
-            if self.last_session.is_some() {
-                self.confirm_prompt = Some(ConfirmKind::ReaderRestart);
-            }
-        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('L') {
-            // Shift-L: open reader log view.
-            self.data_view = Some(DataViewState::from_nodes(build_reader_log_nodes(
-                &self.log_buffer,
-            )));
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('!') {
+            // !: begin composite key sequence (!l / !L).
+            self.pending_app_key = Some('!');
         } else if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('k')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -314,20 +345,6 @@ impl App {
             // Ctrl-K: kill confirmation (only when live).
             if self.terminal.is_live() {
                 self.confirm_prompt = Some(ConfirmKind::Kill);
-            }
-        } else if key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Char('d')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            // Ctrl-D: enable debug logging to /tmp/agent-transcript.log.
-            if self.debug_writer.is_enabled() {
-                self.flash_message = Some((
-                    format!("Already writing logs to {}", crate::logging::LOG_PATH),
-                    false,
-                    std::time::Instant::now(),
-                ));
-            } else {
-                self.confirm_prompt = Some(ConfirmKind::DebugLog);
             }
         } else {
             let action = self

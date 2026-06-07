@@ -99,6 +99,8 @@ pub struct App {
     clipboard_backend: Option<ClipboardBackend>,
     /// Handle for toggling debug file logging at runtime (Ctrl-D).
     pub(super) debug_writer: crate::logging::DebugHandle,
+    /// Pending first key of an app-level composite sequence (e.g. `!`).
+    pub(super) pending_app_key: Option<char>,
 }
 
 impl App {
@@ -136,6 +138,7 @@ impl App {
             last_session: None,
             clipboard_backend: None,
             debug_writer,
+            pending_app_key: None,
         };
 
         match start_mode {

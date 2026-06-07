@@ -49,13 +49,14 @@ pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
             ],
         ),
         (
-            "Info",
+            "Info & Debug",
             &[
                 ("Shift-I", "Open session info view"),
-                ("Shift-L", "Open reader log view"),
-                ("Shift-R", "Restart reader (with confirm)"),
-                ("Shift-D", "Toggle debug info in status bar"),
                 ("?", "Open this key shortcuts view"),
+                ("!s", "Toggle debug info in status bar"),
+                ("!l", "Open reader log view"),
+                ("!L", "Enable debug file logging"),
+                ("!r", "Restart reader (with confirm)"),
             ],
         ),
     ];
@@ -102,7 +103,7 @@ mod tests {
         assert!(labels.contains(&"Navigation"));
         assert!(labels.contains(&"Drill-down"));
         assert!(labels.contains(&"Table mode"));
-        assert!(labels.contains(&"Info"));
+        assert!(labels.contains(&"Info & Debug"));
     }
 
     #[test]

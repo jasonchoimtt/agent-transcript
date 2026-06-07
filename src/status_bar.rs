@@ -29,6 +29,8 @@ pub struct StatusBar<'a> {
     pub session_label: Option<String>,
     /// Current collapsed crop for the terminal pane (shown in debug mode).
     pub collapsed_crop: Option<CollapsedCrop>,
+    /// Pending first key of an app-level composite sequence (e.g. `!`).
+    pub pending_app_key: Option<char>,
     /// Theme primary color, used for key-name highlights and confirm prompt bg.
     pub primary: Color,
     /// Theme muted color, used for hint text and status backgrounds.
@@ -97,8 +99,11 @@ impl StatusBar<'_> {
         let left = hints(&left_pairs, self.primary, self.muted, false);
         let right = right_pairs.map(|pairs| {
             let mut line = hints(&pairs, self.primary, self.muted, true);
-            // Prepend pending-key indicator (e.g. " z…") when a multi-key prefix is active.
-            if let Some(c) = self.tree_state.key_parser.pending_char() {
+            // Prepend pending-key indicator when a multi-key prefix is active.
+            let pending = self
+                .pending_app_key
+                .or_else(|| self.tree_state.key_parser.pending_char());
+            if let Some(c) = pending {
                 let style = Style::default().add_modifier(Modifier::DIM);
                 let mut spans = vec![Span::styled(format!(" {c}…  "), style)];
                 spans.extend(line.spans);
