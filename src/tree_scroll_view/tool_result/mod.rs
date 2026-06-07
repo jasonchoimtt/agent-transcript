@@ -27,7 +27,6 @@ pub enum ToolResultPayload {
 pub struct FileDeltaState {
     pub file_path: String,
     pub hunks: Vec<PatchHunk>,
-    pub current_hunk: usize,
     /// None = show all context lines; Some(n) = at most n per change block.
     pub context_lines: Option<usize>,
     pending_y: bool,
@@ -59,7 +58,6 @@ impl ToolResultUiState {
             payload: ToolResultPayload::FileDelta(FileDeltaState {
                 file_path,
                 hunks,
-                current_hunk: 0,
                 context_lines,
                 pending_y: false,
             }),
@@ -110,7 +108,6 @@ impl UiState for ToolResultUiState {
         if let (ToolResultPayload::FileDelta(old), ToolResultPayload::FileDelta(new_fd)) =
             (&self.payload, &mut preserved.payload)
         {
-            new_fd.current_hunk = old.current_hunk.min(new_fd.hunks.len().saturating_sub(1));
             new_fd.context_lines = old.context_lines;
         }
 
@@ -573,62 +570,6 @@ mod tests {
         );
     }
 
-    // ── Navigation ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn navigate_next_hunk_increments_index() {
-        let h1 = make_hunk(&["+a"]);
-        let h2 = make_hunk(&["+b"]);
-        let mut state = make_fd_state(vec![h1, h2]);
-        let r = state.handle_key(press(KeyCode::Char('l')));
-        assert!(matches!(r, ComponentKeyResult::Consumed { .. }));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.current_hunk, 1);
-        }
-    }
-
-    #[test]
-    fn navigate_clamps_at_last_hunk() {
-        let h = make_hunk(&["+a"]);
-        let mut state = make_fd_state(vec![h]);
-        // Already at last (only) hunk; l should still consume but not go beyond.
-        let r = state.handle_key(press(KeyCode::Char('l')));
-        assert!(matches!(r, ComponentKeyResult::Consumed { .. }));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.current_hunk, 0);
-        }
-    }
-
-    #[test]
-    fn navigate_first_last_hunk() {
-        let h1 = make_hunk(&["+a"]);
-        let h2 = make_hunk(&["+b"]);
-        let h3 = make_hunk(&["+c"]);
-        let mut state = make_fd_state(vec![h1, h2, h3]);
-        // Jump to last.
-        state.handle_key(press(KeyCode::Char('$')));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.current_hunk, 2);
-        }
-        // Jump back to first.
-        state.handle_key(press(KeyCode::Char('0')));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.current_hunk, 0);
-        }
-    }
-
-    #[test]
-    fn caret_jumps_to_first_hunk() {
-        let h1 = make_hunk(&["+a"]);
-        let h2 = make_hunk(&["+b"]);
-        let mut state = make_fd_state(vec![h1, h2]);
-        state.handle_key(press(KeyCode::Char('l'))); // go to 1
-        state.handle_key(press(KeyCode::Char('^'))); // back to 0
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.current_hunk, 0);
-        }
-    }
-
     #[test]
     fn space_toggles_expanded() {
         let h = make_hunk(&["+a"]);
@@ -698,11 +639,10 @@ mod tests {
     }
 
     #[test]
-    fn expanded_copy_includes_all_hunks() {
+    fn copy_always_includes_all_hunks() {
         let h1 = make_hunk(&["+hunk1"]);
         let h2 = make_hunk(&["+hunk2"]);
         let mut state = ToolResultUiState::file_delta("f.rs".to_string(), vec![h1, h2], None);
-        state.expanded = true;
         let r = state.handle_key(press(KeyCode::Char('Y')));
         if let ComponentKeyResult::Copy { content } = r {
             assert!(content.contains("+hunk1"));

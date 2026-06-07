@@ -146,7 +146,6 @@ pub struct ToolResultStyle {
     pub error_indicator: Option<String>,
     pub error_indicator_style: Option<SpanStyle>,
     pub file_path: SpanStyle,
-    pub paginator: SpanStyle,
     pub diff_stat: SpanStyle,
     pub diff_stat_removed: SpanStyle,
     pub diff_stat_added: SpanStyle,

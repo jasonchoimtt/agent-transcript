@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    ComponentKeyResult, FileDeltaState, PatchHunk, ToolResultPayload, ToolResultUiState,
-    format_unified_diff, max_context_in_hunk,
+    ComponentKeyResult, FileDeltaState, ToolResultPayload, ToolResultUiState, format_unified_diff,
+    max_context_in_hunk,
 };
 
 pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultUiState) -> ComponentKeyResult {
@@ -32,7 +32,7 @@ pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultUiState) -> C
             if fd.pending_y {
                 fd.pending_y = false;
                 if key.code == KeyCode::Char('y') {
-                    let content = build_copy_content(fd, state.expanded);
+                    let content = build_copy_content(fd);
                     return ComponentKeyResult::Copy { content };
                 }
                 return ComponentKeyResult::Unhandled;
@@ -40,7 +40,7 @@ pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultUiState) -> C
 
             match key.code {
                 KeyCode::Char('Y') => {
-                    let content = build_copy_content(fd, state.expanded);
+                    let content = build_copy_content(fd);
                     return ComponentKeyResult::Copy { content };
                 }
                 KeyCode::Char('y') => {
@@ -72,65 +72,17 @@ pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultUiState) -> C
     }
 }
 
-fn build_copy_content(fd: &FileDeltaState, expanded: bool) -> String {
-    let hunks: &[PatchHunk] = if expanded {
-        &fd.hunks
-    } else {
-        fd.hunks
-            .get(fd.current_hunk..=fd.current_hunk)
-            .unwrap_or(&[])
-    };
-    format_unified_diff(&fd.file_path, hunks)
+fn build_copy_content(fd: &FileDeltaState) -> String {
+    format_unified_diff(&fd.file_path, &fd.hunks)
 }
 
 fn handle_file_delta_key(key: KeyEvent, fd: &mut FileDeltaState) -> Option<ComponentKeyResult> {
-    let n_hunks = fd.hunks.len();
-
     match key.code {
-        // Navigate between hunks.
-        KeyCode::Char('h') | KeyCode::Left => {
-            fd.current_hunk = fd.current_hunk.saturating_sub(1);
-            Some(ComponentKeyResult::Consumed {
-                invalidates_height: true,
-            })
-        }
-        KeyCode::Char('l') | KeyCode::Right => {
-            if n_hunks > 0 {
-                fd.current_hunk = fd.current_hunk.min(n_hunks - 1);
-                // Advance but stay in bounds.
-                if fd.current_hunk + 1 < n_hunks {
-                    fd.current_hunk += 1;
-                }
-            }
-            Some(ComponentKeyResult::Consumed {
-                invalidates_height: true,
-            })
-        }
-        // First / last hunk.
-        KeyCode::Char('0') | KeyCode::Char('^') => {
-            fd.current_hunk = 0;
-            Some(ComponentKeyResult::Consumed {
-                invalidates_height: true,
-            })
-        }
-        KeyCode::Char('$') => {
-            if n_hunks > 0 {
-                fd.current_hunk = n_hunks - 1;
-            }
-            Some(ComponentKeyResult::Consumed {
-                invalidates_height: true,
-            })
-        }
         // Context lines adjustment.
         KeyCode::Char('-') => {
             let new_ctx = match fd.context_lines {
                 None => {
-                    // Compute max context from current hunk.
-                    let max = fd
-                        .hunks
-                        .get(fd.current_hunk)
-                        .map(max_context_in_hunk)
-                        .unwrap_or(0);
+                    let max = fd.hunks.iter().map(max_context_in_hunk).max().unwrap_or(0);
                     Some(max.saturating_sub(1))
                 }
                 Some(n) => Some(n.saturating_sub(1)),
@@ -149,11 +101,7 @@ fn handle_file_delta_key(key: KeyEvent, fd: &mut FileDeltaState) -> Option<Compo
                     })
                 }
                 Some(n) => {
-                    let max = fd
-                        .hunks
-                        .get(fd.current_hunk)
-                        .map(max_context_in_hunk)
-                        .unwrap_or(0);
+                    let max = fd.hunks.iter().map(max_context_in_hunk).max().unwrap_or(0);
                     if n + 1 > max {
                         fd.context_lines = None; // snap back to show-all
                     } else {

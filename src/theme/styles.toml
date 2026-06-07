@@ -27,7 +27,6 @@ content               = { dim = true }
 indicator_style       = { fg = "muted" }
 error_indicator_style = { fg = "error" }
 file_path             = { bold = true }
-paginator             = { fg = "muted" }
 diff_stat             = { fg = "diff_stat" }
 diff_stat_removed     = { fg = "diff_removed_fg" }
 diff_stat_added       = { fg = "diff_added_fg" }

@@ -18,9 +18,19 @@ pub const LINE_NUM_PREFIX_LEN: usize = 11;
 /// Max shell lines shown in compact (non-expanded) mode.
 const SHELL_COMPACT_MAX: usize = 10;
 
+/// Max hunks shown in compact (non-expanded) mode.
+const DELTA_COMPACT_MAX_HUNKS: usize = 3;
+
 fn shell_ellipsis_line(hidden: usize) -> Line<'static> {
     Line::from(Span::styled(
         format!("… ({hidden} lines hidden)"),
+        Style::new().add_modifier(Modifier::DIM),
+    ))
+}
+
+fn more_patches_line(n: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("… ({n} more patch{})", if n == 1 { "" } else { "es" }),
         Style::new().add_modifier(Modifier::DIM),
     ))
 }
@@ -59,14 +69,13 @@ fn compute_file_delta_height(fd: &FileDeltaState, expanded: bool, wrap: bool, wi
     // 1 header line.
     let mut h: u16 = 1;
     let content_width = (width as usize).saturating_sub(LINE_NUM_PREFIX_LEN) as u16;
-    let hunks: &[_] = if expanded {
-        &fd.hunks
+    let n_hunks = fd.hunks.len();
+    let visible_count = if expanded {
+        n_hunks
     } else {
-        fd.hunks
-            .get(fd.current_hunk..=fd.current_hunk)
-            .unwrap_or(&[])
+        n_hunks.min(DELTA_COMPACT_MAX_HUNKS)
     };
-    for hunk in hunks {
+    for hunk in &fd.hunks[..visible_count] {
         let (lines, hidden) = build_diff_lines(hunk, expanded, fd.context_lines);
         for dl in &lines {
             h += if wrap {
@@ -81,6 +90,9 @@ fn compute_file_delta_height(fd: &FileDeltaState, expanded: bool, wrap: bool, wi
         if hidden > 0 {
             h += 1;
         }
+    }
+    if !expanded && n_hunks > DELTA_COMPACT_MAX_HUNKS {
+        h += 1; // "more patches" indicator
     }
     h.max(1) + 1
 }
@@ -168,7 +180,6 @@ fn render_file_delta(
     }
 
     let file_path_style = style.file_path.to_style(palette);
-    let paginator_style = style.paginator.to_style(palette);
     let stat_removed_style = style.diff_stat_removed.to_style(palette);
     let stat_added_style = style.diff_stat_added.to_style(palette);
     let ln_style = style.line_num.to_style(palette);
@@ -176,36 +187,30 @@ fn render_file_delta(
     let n_hunks = fd.hunks.len();
     let header = build_header_line(
         fd,
-        expanded,
         area.width,
         file_path_style,
-        paginator_style,
         stat_removed_style,
         stat_added_style,
     );
 
     let mut content_lines: Vec<Line<'static>> = vec![header];
 
-    if expanded {
-        for hunk in &fd.hunks {
-            let (diff_lines, hidden) = build_diff_lines(hunk, true, fd.context_lines);
-            for dl in &diff_lines {
-                content_lines.push(build_diff_line(dl, area.width, palette, style));
-            }
-            if hidden > 0 {
-                content_lines.push(diff_ellipsis_line(hidden, ln_style));
-            }
-        }
-    } else if n_hunks > 0
-        && let Some(hunk) = fd.hunks.get(fd.current_hunk)
-    {
-        let (diff_lines, hidden) = build_diff_lines(hunk, false, fd.context_lines);
+    let visible_count = if expanded {
+        n_hunks
+    } else {
+        n_hunks.min(DELTA_COMPACT_MAX_HUNKS)
+    };
+    for hunk in &fd.hunks[..visible_count] {
+        let (diff_lines, hidden) = build_diff_lines(hunk, expanded, fd.context_lines);
         for dl in &diff_lines {
             content_lines.push(build_diff_line(dl, area.width, palette, style));
         }
         if hidden > 0 {
             content_lines.push(diff_ellipsis_line(hidden, ln_style));
         }
+    }
+    if !expanded && n_hunks > DELTA_COMPACT_MAX_HUNKS {
+        content_lines.push(more_patches_line(n_hunks - DELTA_COMPACT_MAX_HUNKS));
     }
 
     Paragraph::new(content_lines)
@@ -234,7 +239,6 @@ fn render_file_delta_wrapped(
     }
 
     let file_path_style = style.file_path.to_style(palette);
-    let paginator_style = style.paginator.to_style(palette);
     let stat_removed_style = style.diff_stat_removed.to_style(palette);
     let stat_added_style = style.diff_stat_added.to_style(palette);
     let ln_style = style.line_num.to_style(palette);
@@ -255,10 +259,8 @@ fn render_file_delta_wrapped(
     if let Some(ha) = header_area {
         let header = build_header_line(
             fd,
-            expanded,
             area.width,
             file_path_style,
-            paginator_style,
             stat_removed_style,
             stat_added_style,
         );
@@ -276,15 +278,14 @@ fn render_file_delta_wrapped(
     let mut right_lines: Vec<Line<'static>> = Vec::new();
     let mut phys_row_bgs: Vec<Option<Color>> = Vec::new();
 
-    let hunks: &[PatchHunk] = if expanded {
-        &fd.hunks
+    let n_hunks = fd.hunks.len();
+    let visible_count = if expanded {
+        n_hunks
     } else {
-        fd.hunks
-            .get(fd.current_hunk..=fd.current_hunk)
-            .unwrap_or(&[])
+        n_hunks.min(DELTA_COMPACT_MAX_HUNKS)
     };
 
-    for hunk in hunks {
+    for hunk in &fd.hunks[..visible_count] {
         let (diff_lines, hidden) = build_diff_lines(hunk, expanded, fd.context_lines);
 
         for dl in &diff_lines {
@@ -321,6 +322,14 @@ fn render_file_delta_wrapped(
             )));
             phys_row_bgs.push(None);
         }
+    }
+
+    if !expanded && n_hunks > DELTA_COMPACT_MAX_HUNKS {
+        let indicator = more_patches_line(n_hunks - DELTA_COMPACT_MAX_HUNKS);
+        // Emit a blank left prefix and the indicator on the right.
+        left_lines.push(Line::from(Span::raw("           ")));
+        right_lines.push(indicator);
+        phys_row_bgs.push(None);
     }
 
     // Pre-fill the right panel background so that end-of-row cells (after word-wrap breaks)
@@ -378,64 +387,21 @@ fn count_file_stats(hunks: &[PatchHunk]) -> (u32, u32) {
 
 fn build_header_line(
     fd: &FileDeltaState,
-    expanded: bool,
     width: u16,
     file_path_style: Style,
-    paginator_style: Style,
     stat_removed_style: Style,
     stat_added_style: Style,
 ) -> Line<'static> {
-    let n_hunks = fd.hunks.len();
     let (added, removed) = count_file_stats(&fd.hunks);
     let stat_rm = format!(" -{removed}");
     let stat_add = format!(" +{added}");
     let stat_len = stat_rm.chars().count() + stat_add.chars().count();
-    let width = width as usize;
-
-    if expanded || n_hunks <= 1 {
-        let available_for_path = width.saturating_sub(stat_len);
-        let displayed_path = clip_path(&fd.file_path, available_for_path);
-        return Line::from(vec![
-            Span::styled(displayed_path, file_path_style),
-            Span::styled(stat_rm, stat_removed_style),
-            Span::styled(stat_add, stat_added_style),
-        ]);
-    }
-
-    // Multi-hunk: build paginator on the right.
-    let current = fd.current_hunk + 1;
-    let mid = format!(" {} / {} ", current, n_hunks);
-    let paginator_len = 1 + mid.chars().count() + 1; // ◀ + mid + ▶
-
-    // Truncate path so that "path stat padding paginator" fits in width.
-    let available_for_path = width.saturating_sub(paginator_len + 1 + stat_len);
+    let available_for_path = (width as usize).saturating_sub(stat_len);
     let displayed_path = clip_path(&fd.file_path, available_for_path);
-
-    let left_col_len = displayed_path.chars().count() + stat_len;
-    let gap = width.saturating_sub(left_col_len + paginator_len);
-    let padding = " ".repeat(gap);
-
-    let at_first = fd.current_hunk == 0;
-    let at_last = fd.current_hunk + 1 >= n_hunks;
-    let left_arrow_style = if at_first {
-        paginator_style.add_modifier(Modifier::DIM)
-    } else {
-        paginator_style
-    };
-    let right_arrow_style = if at_last {
-        paginator_style.add_modifier(Modifier::DIM)
-    } else {
-        paginator_style
-    };
-
     Line::from(vec![
         Span::styled(displayed_path, file_path_style),
         Span::styled(stat_rm, stat_removed_style),
         Span::styled(stat_add, stat_added_style),
-        Span::raw(padding),
-        Span::styled("◀", left_arrow_style),
-        Span::styled(mid, paginator_style),
-        Span::styled("▶", right_arrow_style),
     ])
 }
 
