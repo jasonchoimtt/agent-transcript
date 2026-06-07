@@ -717,9 +717,6 @@ impl TreeScrollViewState {
         for op in ops {
             self.apply_one(op);
         }
-        if self.selection_index.is_empty() {
-            self.initialize_selection();
-        }
     }
 
     fn apply_one(&mut self, op: ReaderOp) {
@@ -750,6 +747,9 @@ impl TreeScrollViewState {
             ReaderOp::ResetDone => {
                 self.reset_snapshot.clear();
             }
+        }
+        if self.selection_index.is_empty() {
+            self.initialize_selection();
         }
     }
 
