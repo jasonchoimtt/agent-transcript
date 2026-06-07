@@ -6,6 +6,22 @@ use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
 
+/// Rewrites the display text of `ToolCall` nodes according to user-defined rules.
+///
+/// Each rule specifies a list of glob patterns to match against the tool name and a
+/// template string. The first matching rule wins. Templates use `{{key}}` placeholders
+/// resolved against the tool's `props` JSON object (e.g. `{{file_path|path}}`). The
+/// `|path` filter shortens absolute paths to workspace-relative or home-relative form.
+///
+/// Formatted output has two parts:
+/// - **First line**: `ToolName(<rendered template>)` — shown as the node's brief.
+/// - **Subsequent lines**: `key=value` pairs for every prop — visible when the node is
+///   expanded (`show_more = true`).
+///
+/// Rules may also carry an `expanded` override (`Some(true/false)`) that sets the node's
+/// `expanded` field unconditionally, bypassing the default error-tag logic in
+/// `UiInitializer`. This runs after `UiInitializer` but before `ToolGrouper`, so
+/// container labels are derived from already-formatted child text.
 pub struct ToolFormatter {
     /// Compiled (patterns, template, expanded_override) tuples, already filtered for this provider.
     rules: Vec<(Vec<Pattern>, String, Option<bool>)>,

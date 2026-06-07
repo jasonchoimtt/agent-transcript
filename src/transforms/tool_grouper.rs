@@ -5,24 +5,45 @@ use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
 
-/// Groups consecutive matching tool-call nodes into a collapsed Container node.
+/// Groups consecutive matching tool-call nodes into a Container node.
+///
+/// # How grouping works
 ///
 /// Uses an emit-then-restructure approach: tool calls are emitted immediately under
 /// their original parent so they are always visible in real time, then restructured
 /// into a Container the moment `min_count` is reached in the same batch.
 ///
 /// Tools sharing the same parent_id are treated as one run; a different parent
-/// (or a non-tool op) breaks the run and may seal the active container.
+/// (or a non-tool-call op) breaks the run and may seal the active container.
 ///
 /// State machine:
 /// - `Collecting` (buffer may be empty) — accumulating tool calls; no group committed yet.
-///   An empty buffer is the initial / idle state (equivalent to the old `None`).
+///   An empty buffer is the initial / idle state.
 /// - `Grouped` (container in tree) — appending additional tools as children.
 ///
-/// When a new tool call extends the buffer, the longest suffix of the buffer that all
-/// match a single configured group is evaluated.  If that suffix length reaches the
-/// group's `min_count`, immediately emit Remove(t2..tN) + Replace(t1 → Container)
-/// and transition to Grouped.
+/// When a new tool call extends the buffer, the longest suffix whose tools all match a
+/// single configured group is evaluated. If that suffix length reaches the group's
+/// `min_count`, immediately emit `Remove(t2..tN) + Replace(t1 → Container)` and
+/// transition to `Grouped`.
+///
+/// # Container lifecycle
+///
+/// - **Forming** (`do_transition`): container is emitted with `expanded = true` so children
+///   are visible while the session is live.
+/// - **Growing** (each subsequent matching tool): container label is refreshed via a
+///   Replace; children are appended under the container.
+/// - **Sealing** (`do_seal`): triggered by the first non-matching op. The container's final
+///   `expanded` state is resolved from the group config:
+///   - `Some(true/false)` — forced unconditionally.
+///   - `None` — error-aware: `true` if any child tool-call carries an `"error"` tag,
+///     `false` otherwise.
+///
+/// # Tag propagation
+///
+/// `container_tag` inspects the ToolCall children and assigns a tag to the container:
+/// - `"error"` — if any child has an error tag (used for error-indicator styling).
+/// - `"success"` — if all children have a success tag.
+/// - no tag — mixed or unknown state.
 pub struct ToolGrouper {
     groups: Vec<ToolGroup>,
     active: ActiveRun,
