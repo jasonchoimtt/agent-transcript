@@ -1,0 +1,741 @@
+mod handler;
+pub mod render;
+
+use crossterm::event::KeyEvent;
+
+use super::state::{ComponentKeyResult, MessageComponent, MessageState, UiState};
+use crate::theme::Palette;
+
+// ── Data types ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ToolResultUiState {
+    pub payload: ToolResultPayload,
+    /// Space-toggled: expand to show all hunks / full output.
+    pub expanded: bool,
+    /// w-toggled: wrap long lines instead of clipping.
+    pub wrap: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolResultPayload {
+    FileDelta(FileDeltaState),
+    ShellOutput(ShellOutputState),
+}
+
+#[derive(Debug, Clone)]
+pub struct FileDeltaState {
+    pub file_path: String,
+    pub hunks: Vec<PatchHunk>,
+    pub current_hunk: usize,
+    /// None = show all context lines; Some(n) = at most n per change block.
+    pub context_lines: Option<usize>,
+    pending_y: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PatchHunk {
+    /// Raw unified diff lines, each with ' ', '+', or '-' prefix.
+    pub lines: Vec<String>,
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellOutputState {
+    pub stderr: String,
+    pub stdout: String,
+}
+
+impl ToolResultUiState {
+    pub fn file_delta(
+        file_path: String,
+        hunks: Vec<PatchHunk>,
+        context_lines: Option<usize>,
+    ) -> Self {
+        Self {
+            payload: ToolResultPayload::FileDelta(FileDeltaState {
+                file_path,
+                hunks,
+                current_hunk: 0,
+                context_lines,
+                pending_y: false,
+            }),
+            expanded: false,
+            wrap: false,
+        }
+    }
+
+    pub fn shell_output(stderr: String, stdout: String) -> Self {
+        Self {
+            payload: ToolResultPayload::ShellOutput(ShellOutputState { stderr, stdout }),
+            expanded: false,
+            wrap: false,
+        }
+    }
+}
+
+// ── UiState / MessageComponent ────────────────────────────────────────────────
+
+impl UiState for ToolResultUiState {
+    fn clone_box(&self) -> Box<dyn UiState> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    fn on_update(&self, new_message: &MessageState) -> Option<Box<dyn UiState>> {
+        let new_state = new_message
+            .ui_state
+            .as_ref()?
+            .as_any()
+            .downcast_ref::<ToolResultUiState>()?;
+
+        let mut preserved = new_state.clone();
+        preserved.expanded = self.expanded;
+        preserved.wrap = self.wrap;
+
+        if let (ToolResultPayload::FileDelta(old), ToolResultPayload::FileDelta(new_fd)) =
+            (&self.payload, &mut preserved.payload)
+        {
+            new_fd.current_hunk = old.current_hunk.min(new_fd.hunks.len().saturating_sub(1));
+            new_fd.context_lines = old.context_lines;
+        }
+
+        Some(Box::new(preserved))
+    }
+
+    fn as_component(&self) -> Option<&dyn MessageComponent> {
+        Some(self)
+    }
+
+    fn as_component_mut(&mut self) -> Option<&mut dyn MessageComponent> {
+        Some(self)
+    }
+}
+
+impl MessageComponent for ToolResultUiState {
+    fn supports_interaction(&self) -> bool {
+        true
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> ComponentKeyResult {
+        handler::handle_tool_result_key(key, self)
+    }
+
+    fn focused_line_range(&self, _palette: &Palette) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn on_viewport_width_changed(&mut self) {}
+
+    fn layout_pass(&mut self, available_width: u16, _palette: &Palette) -> Option<u16> {
+        let height = render::compute_height(self, available_width);
+        Some(height)
+    }
+}
+
+pub fn format_unified_diff(file_path: &str, hunks: &[PatchHunk]) -> String {
+    let path = file_path.trim_start_matches('/');
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    for hunk in hunks {
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines,
+        ));
+        for line in &hunk.lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+// ── Context filtering ─────────────────────────────────────────────────────────
+
+/// Compute the maximum consecutive context lines in a hunk.
+pub fn max_context_in_hunk(hunk: &PatchHunk) -> usize {
+    let mut max = 0usize;
+    let mut run = 0usize;
+    for line in &hunk.lines {
+        if line.starts_with(' ') {
+            run += 1;
+            if run > max {
+                max = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    max
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffLineKind {
+    Added,
+    Removed,
+    /// Added line in new-version-only mode (removed lines hidden). Rendered with a "changed" color.
+    Changed,
+    Context,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub old_num: Option<u32>,
+    pub new_num: Option<u32>,
+    pub kind: DiffLineKind,
+    /// Line content without the leading diff marker (+/-/ ).
+    pub content: String,
+}
+
+/// Build the list of `DiffLine`s to render for a single hunk.
+///
+/// When `show_full = false` (non-expanded mode):
+/// - ≤10 changed lines → full diff
+/// - >10 changed lines → new-version-only (strip removed lines)
+///   - if >30 added lines: truncate to first 30, returns a trailing ellipsis marker
+///
+/// `context_limit` trims context lines to at most that many per block.
+/// `None` means keep all context.
+///
+/// Returns `(lines, hidden_count)` where `hidden_count > 0` means truncation occurred.
+pub fn build_diff_lines(
+    hunk: &PatchHunk,
+    show_full: bool,
+    context_limit: Option<usize>,
+) -> (Vec<DiffLine>, usize) {
+    let changed_count = hunk
+        .lines
+        .iter()
+        .filter(|l| l.starts_with('+') || l.starts_with('-'))
+        .count();
+
+    let use_full_diff = show_full || changed_count <= 10;
+
+    let raw_lines: Vec<(DiffLineKind, &str)> = hunk
+        .lines
+        .iter()
+        .filter_map(|l| {
+            if let Some(rest) = l.strip_prefix('+') {
+                let kind = if use_full_diff {
+                    DiffLineKind::Added
+                } else {
+                    DiffLineKind::Changed
+                };
+                Some((kind, rest))
+            } else if let Some(rest) = l.strip_prefix('-') {
+                if use_full_diff {
+                    Some((DiffLineKind::Removed, rest))
+                } else {
+                    None
+                }
+            } else if let Some(rest) = l.strip_prefix(' ') {
+                Some((DiffLineKind::Context, rest))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Count added lines to decide whether to truncate (new-version mode only).
+    let added_count = raw_lines
+        .iter()
+        .filter(|(k, _)| matches!(k, DiffLineKind::Added | DiffLineKind::Changed))
+        .count();
+    let truncate_at = if !use_full_diff && added_count > 30 {
+        Some(30usize)
+    } else {
+        None
+    };
+
+    // Filter context runs if a limit is set.
+    // Strategy: within each "context block" (consecutive context lines between change blocks),
+    // keep at most `context_limit` from the start and end of that block.
+    let filtered = apply_context_limit(&raw_lines, context_limit);
+
+    // Assign line numbers and apply truncation.
+    let mut old_n = hunk.old_start;
+    let mut new_n = hunk.new_start;
+    let mut added_seen = 0usize;
+    let mut result = Vec::new();
+
+    for (kind, content) in &filtered {
+        if let Some(limit) = truncate_at
+            && matches!(kind, DiffLineKind::Added | DiffLineKind::Changed)
+        {
+            if added_seen >= limit {
+                break;
+            }
+            added_seen += 1;
+        }
+
+        let (old_num, new_num) = match kind {
+            DiffLineKind::Context => {
+                let o = Some(old_n);
+                let n = Some(new_n);
+                old_n += 1;
+                new_n += 1;
+                (o, n)
+            }
+            DiffLineKind::Removed => {
+                let o = Some(old_n);
+                old_n += 1;
+                (o, None)
+            }
+            DiffLineKind::Added | DiffLineKind::Changed => {
+                let n = Some(new_n);
+                new_n += 1;
+                (None, n)
+            }
+        };
+
+        result.push(DiffLine {
+            old_num,
+            new_num,
+            kind: kind.clone(),
+            content: content.to_string(),
+        });
+    }
+
+    let hidden = filtered.len() - result.len();
+    (result, hidden)
+}
+
+fn apply_context_limit<'a>(
+    lines: &[(DiffLineKind, &'a str)],
+    limit: Option<usize>,
+) -> Vec<(DiffLineKind, &'a str)> {
+    let Some(limit) = limit else {
+        return lines.to_vec();
+    };
+
+    // Context semantics: each change block has `limit` lines of context on each side.
+    // - Leading context (before first change): keep the LAST `limit` lines (closest to change).
+    // - Trailing context (after last change): keep the FIRST `limit` lines (closest to change).
+    // - Middle context (between two change groups): keep first `limit` AND last `limit`.
+    let first_change = lines.iter().position(|(k, _)| *k != DiffLineKind::Context);
+    let last_change = lines.iter().rposition(|(k, _)| *k != DiffLineKind::Context);
+
+    let n = lines.len();
+    let mut keep = vec![false; n];
+
+    let mut i = 0;
+    while i < n {
+        if lines[i].0 != DiffLineKind::Context {
+            keep[i] = true;
+            i += 1;
+            continue;
+        }
+        let block_start = i;
+        while i < n && lines[i].0 == DiffLineKind::Context {
+            i += 1;
+        }
+        let block_end = i; // exclusive
+        let block_len = block_end - block_start;
+
+        let is_leading = first_change.is_none_or(|fc| block_end <= fc);
+        let is_trailing = last_change.is_none_or(|lc| block_start > lc);
+
+        if is_leading {
+            // Keep last `limit` lines.
+            let start = block_end.saturating_sub(limit);
+            keep[start..block_end].fill(true);
+        } else if is_trailing {
+            // Keep first `limit` lines.
+            keep[block_start..(block_start + limit.min(block_len))].fill(true);
+        } else {
+            // Middle block: keep first `limit` (after-context) AND last `limit` (before-context).
+            keep[block_start..(block_start + limit.min(block_len))].fill(true);
+            keep[block_end.saturating_sub(limit)..block_end].fill(true);
+        }
+    }
+
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| keep[*idx])
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
+// ── Shell output helpers ──────────────────────────────────────────────────────
+
+/// Collect lines for shell output rendering.
+/// Returns `(lines, is_truncated)` where each entry is `(content, is_stderr)`.
+/// In compact mode, returns the tail of at most `max_lines` lines total.
+/// Returns `(lines, hidden_count)` where `hidden_count > 0` means the output was trimmed.
+/// When truncated, the tail (`max_lines` lines) is returned.
+pub fn collect_shell_lines(
+    state: &ShellOutputState,
+    max_lines: Option<usize>,
+) -> (Vec<(String, bool)>, usize) {
+    let mut all: Vec<(String, bool)> = Vec::new();
+    for line in state.stderr.lines() {
+        all.push((line.to_string(), true));
+    }
+    for line in state.stdout.lines() {
+        all.push((line.to_string(), false));
+    }
+
+    match max_lines {
+        None => (all, 0),
+        Some(limit) => {
+            if all.len() <= limit {
+                (all, 0)
+            } else {
+                let hidden = all.len() - limit;
+                (all[hidden..].to_vec(), hidden)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn press_ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn make_hunk(lines: &[&str]) -> PatchHunk {
+        PatchHunk {
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+            old_start: 1,
+            old_lines: lines.iter().filter(|l| !l.starts_with('+')).count() as u32,
+            new_start: 1,
+            new_lines: lines.iter().filter(|l| !l.starts_with('-')).count() as u32,
+        }
+    }
+
+    fn make_fd_state(hunks: Vec<PatchHunk>) -> ToolResultUiState {
+        ToolResultUiState::file_delta("src/foo.rs".to_string(), hunks, None)
+    }
+
+    // ── Parsing / detection ───────────────────────────────────────────────────
+
+    #[test]
+    fn enricher_detects_file_delta() {
+        let hunk = make_hunk(&[" ctx", "-old", "+new"]);
+        let state = ToolResultUiState::file_delta("a.rs".to_string(), vec![hunk], None);
+        assert!(matches!(state.payload, ToolResultPayload::FileDelta(_)));
+    }
+
+    #[test]
+    fn enricher_detects_shell_output() {
+        let state = ToolResultUiState::shell_output("err".to_string(), "out".to_string());
+        assert!(matches!(state.payload, ToolResultPayload::ShellOutput(_)));
+    }
+
+    // ── Context filtering ─────────────────────────────────────────────────────
+
+    #[test]
+    fn context_limit_0_strips_all_context() {
+        let hunk = make_hunk(&[" ctx1", " ctx2", "+added", " ctx3", " ctx4"]);
+        let (lines, _) = build_diff_lines(&hunk, true, Some(0));
+        assert!(lines.iter().all(|l| l.kind != DiffLineKind::Context));
+        assert_eq!(lines.len(), 1); // only the added line
+    }
+
+    #[test]
+    fn context_limit_2_keeps_at_most_2_per_block() {
+        // 4 context, then a change, then 4 context
+        let hunk = make_hunk(&[
+            " c1", " c2", " c3", " c4", "+add", " c5", " c6", " c7", " c8",
+        ]);
+        let (lines, _) = build_diff_lines(&hunk, true, Some(2));
+        let ctx_count = lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Context)
+            .count();
+        // At most 2 from start of first block + 2 from end of first block = up to 4 (but block is 4 so we get 4)
+        // Before change: 4 ctx → keep last 2 (since it's just before a change block, we want the 2 closest)
+        // After change: 4 ctx → keep first 2 (closest to the change)
+        // Total: 4 context lines
+        assert_eq!(ctx_count, 4);
+    }
+
+    #[test]
+    fn context_limit_none_keeps_all() {
+        let hunk = make_hunk(&[" c1", " c2", " c3", "+add"]);
+        let (lines, _) = build_diff_lines(&hunk, true, None);
+        let ctx_count = lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Context)
+            .count();
+        assert_eq!(ctx_count, 3);
+    }
+
+    // ── Truncation thresholds ─────────────────────────────────────────────────
+
+    #[test]
+    fn eleven_changed_lines_triggers_new_version_mode() {
+        // 11 removed + 11 added = 22 changed total → new-version mode (strip removed)
+        let mut line_data: Vec<&str> = Vec::new();
+        for _ in 0..11 {
+            line_data.push("-removed");
+            line_data.push("+added");
+        }
+        let hunk = make_hunk(&line_data);
+        let (lines, _) = build_diff_lines(&hunk, false, None);
+        // No removed lines should appear; all added lines should be Changed (new-version mode).
+        assert!(lines.iter().all(|l| l.kind != DiffLineKind::Removed));
+        assert!(lines.iter().all(|l| l.kind != DiffLineKind::Added));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Changed)
+                .count(),
+            11
+        );
+    }
+
+    #[test]
+    fn ten_changed_lines_keeps_full_diff() {
+        let mut line_data: Vec<&str> = Vec::new();
+        for _ in 0..5 {
+            line_data.push("-removed");
+            line_data.push("+added");
+        }
+        let hunk = make_hunk(&line_data);
+        let (lines, _) = build_diff_lines(&hunk, false, None);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Removed)
+                .count(),
+            5
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Added)
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn thirty_one_added_lines_truncated_to_30() {
+        // 31 added lines: should be truncated
+        let mut line_data: Vec<&str> = Vec::new();
+        // make changed count > 10 to trigger new-version mode
+        for _ in 0..31 {
+            line_data.push("-old");
+            line_data.push("+new");
+        }
+        let hunk = make_hunk(&line_data);
+        let (lines, hidden) = build_diff_lines(&hunk, false, None);
+        assert!(hidden > 0);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Changed)
+                .count(),
+            30
+        );
+    }
+
+    #[test]
+    fn thirty_added_lines_not_truncated() {
+        let mut line_data: Vec<&str> = Vec::new();
+        for _ in 0..30 {
+            line_data.push("-old");
+            line_data.push("+new");
+        }
+        let hunk = make_hunk(&line_data);
+        let (lines, hidden) = build_diff_lines(&hunk, false, None);
+        assert_eq!(hidden, 0);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Changed)
+                .count(),
+            30
+        );
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn navigate_next_hunk_increments_index() {
+        let h1 = make_hunk(&["+a"]);
+        let h2 = make_hunk(&["+b"]);
+        let mut state = make_fd_state(vec![h1, h2]);
+        let r = state.handle_key(press(KeyCode::Char('l')));
+        assert!(matches!(r, ComponentKeyResult::Consumed { .. }));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.current_hunk, 1);
+        }
+    }
+
+    #[test]
+    fn navigate_clamps_at_last_hunk() {
+        let h = make_hunk(&["+a"]);
+        let mut state = make_fd_state(vec![h]);
+        // Already at last (only) hunk; l should still consume but not go beyond.
+        let r = state.handle_key(press(KeyCode::Char('l')));
+        assert!(matches!(r, ComponentKeyResult::Consumed { .. }));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.current_hunk, 0);
+        }
+    }
+
+    #[test]
+    fn navigate_first_last_hunk() {
+        let h1 = make_hunk(&["+a"]);
+        let h2 = make_hunk(&["+b"]);
+        let h3 = make_hunk(&["+c"]);
+        let mut state = make_fd_state(vec![h1, h2, h3]);
+        // Jump to last.
+        state.handle_key(press(KeyCode::Char('$')));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.current_hunk, 2);
+        }
+        // Jump back to first.
+        state.handle_key(press(KeyCode::Char('0')));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.current_hunk, 0);
+        }
+    }
+
+    #[test]
+    fn caret_jumps_to_first_hunk() {
+        let h1 = make_hunk(&["+a"]);
+        let h2 = make_hunk(&["+b"]);
+        let mut state = make_fd_state(vec![h1, h2]);
+        state.handle_key(press(KeyCode::Char('l'))); // go to 1
+        state.handle_key(press(KeyCode::Char('^'))); // back to 0
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.current_hunk, 0);
+        }
+    }
+
+    #[test]
+    fn space_toggles_expanded() {
+        let h = make_hunk(&["+a"]);
+        let mut state = make_fd_state(vec![h]);
+        assert!(!state.expanded);
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert!(state.expanded);
+        state.handle_key(press(KeyCode::Char(' ')));
+        assert!(!state.expanded);
+    }
+
+    #[test]
+    fn esc_exits_interaction() {
+        let h = make_hunk(&["+a"]);
+        let mut state = make_fd_state(vec![h]);
+        assert!(matches!(
+            state.handle_key(press(KeyCode::Esc)),
+            ComponentKeyResult::ExitInteraction
+        ));
+    }
+
+    #[test]
+    fn ctrl_c_exits_interaction() {
+        let h = make_hunk(&["+a"]);
+        let mut state = make_fd_state(vec![h]);
+        assert!(matches!(
+            state.handle_key(press_ctrl(KeyCode::Char('c'))),
+            ComponentKeyResult::ExitInteraction
+        ));
+    }
+
+    #[test]
+    fn ctrl_n_passthrough() {
+        let h = make_hunk(&["+a"]);
+        let mut state = make_fd_state(vec![h]);
+        assert!(matches!(
+            state.handle_key(press_ctrl(KeyCode::Char('n'))),
+            ComponentKeyResult::Passthrough
+        ));
+    }
+
+    // ── Copy ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn yy_copies_unified_diff() {
+        let hunk = make_hunk(&[" ctx", "-old", "+new"]);
+        let mut state = ToolResultUiState::file_delta("src/foo.rs".to_string(), vec![hunk], None);
+        state.handle_key(press(KeyCode::Char('y'))); // pending_y set
+        let r = state.handle_key(press(KeyCode::Char('y')));
+        if let ComponentKeyResult::Copy { content } = r {
+            assert!(content.contains("--- a/src/foo.rs"));
+            assert!(content.contains("+++ b/src/foo.rs"));
+            assert!(content.contains("@@"));
+            assert!(content.contains("-old"));
+            assert!(content.contains("+new"));
+        } else {
+            panic!("expected Copy result");
+        }
+    }
+
+    #[test]
+    fn capital_y_copies_unified_diff() {
+        let hunk = make_hunk(&["+line"]);
+        let mut state = ToolResultUiState::file_delta("a.rs".to_string(), vec![hunk], None);
+        let r = state.handle_key(press(KeyCode::Char('Y')));
+        assert!(matches!(r, ComponentKeyResult::Copy { .. }));
+    }
+
+    #[test]
+    fn expanded_copy_includes_all_hunks() {
+        let h1 = make_hunk(&["+hunk1"]);
+        let h2 = make_hunk(&["+hunk2"]);
+        let mut state = ToolResultUiState::file_delta("f.rs".to_string(), vec![h1, h2], None);
+        state.expanded = true;
+        let r = state.handle_key(press(KeyCode::Char('Y')));
+        if let ComponentKeyResult::Copy { content } = r {
+            assert!(content.contains("+hunk1"));
+            assert!(content.contains("+hunk2"));
+        } else {
+            panic!("expected Copy result");
+        }
+    }
+
+    // ── Context adjustment ────────────────────────────────────────────────────
+
+    #[test]
+    fn minus_from_none_steps_down_from_max() {
+        let hunk = make_hunk(&[" c1", " c2", " c3", "+add"]);
+        let mut state = make_fd_state(vec![hunk]);
+        // context_lines starts as None (show all → 3 context lines)
+        state.handle_key(press(KeyCode::Char('-')));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.context_lines, Some(2)); // max=3, step to 2
+        }
+    }
+
+    #[test]
+    fn equals_from_max_snaps_to_none() {
+        let hunk = make_hunk(&[" c1", " c2", "+add"]);
+        let mut state = make_fd_state(vec![hunk]);
+        // max_context = 2; set context_lines = Some(2) manually
+        if let ToolResultPayload::FileDelta(fd) = &mut state.payload {
+            fd.context_lines = Some(2);
+        }
+        state.handle_key(press(KeyCode::Char('=')));
+        if let ToolResultPayload::FileDelta(fd) = &state.payload {
+            assert_eq!(fd.context_lines, None); // snapped back
+        }
+    }
+}

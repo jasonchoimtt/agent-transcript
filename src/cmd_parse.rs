@@ -61,7 +61,7 @@ async fn drain_transform_print(
     }
     eprintln!("{} raw ops loaded", raw_ops.len());
 
-    let mut transforms = build_transforms(&config.transforms, provider, None);
+    let mut transforms = build_transforms(&config.transforms, provider, None, &config.widgets.tool_result.file_delta);
     let ops = apply_batch(raw_ops, &mut transforms);
     eprintln!("{} ops after transforms", ops.len());
 
@@ -116,7 +116,12 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
         flags.push("hidden");
     }
 
-    // Header line: type  [flags]  id=…  "brief"  (N children)
+    let ui_state_name = node.ui_state.as_ref().map(|s| {
+        let full = s.type_name();
+        full.rsplit("::").next().unwrap_or(full)
+    });
+
+    // Header line: type  [flags]  id=…  ui=…  "brief"  (N children)
     if color {
         let flags_part = if flags.is_empty() {
             String::new()
@@ -124,6 +129,10 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
             format!("  {}", format!("[{}]", flags.join(", ")).dark_grey())
         };
         let id_part = format!("  {}", format!("id={}", node.id).dark_grey());
+        let ui_part = ui_state_name
+            .as_deref()
+            .map(|n| format!("  {}", format!("ui={n}").cyan()))
+            .unwrap_or_default();
         let brief_part = node
             .brief
             .as_deref()
@@ -138,11 +147,12 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
             )
         };
         println!(
-            "{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}",
             indent,
             type_name.with(type_color(&node.message_type)).bold(),
             flags_part,
             id_part,
+            ui_part,
             brief_part,
             children_part,
         );
@@ -152,6 +162,10 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
         } else {
             format!("  [{}]", flags.join(", "))
         };
+        let ui_str = ui_state_name
+            .as_deref()
+            .map(|n| format!("  ui={n}"))
+            .unwrap_or_default();
         let brief_str = node
             .brief
             .as_deref()
@@ -163,8 +177,8 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
             format!("  ({} children)", node.children.len())
         };
         println!(
-            "{}{}{}  id={}{}{}",
-            indent, type_name, flags_str, node.id, brief_str, children_str,
+            "{}{}{}  id={}{}{}{}",
+            indent, type_name, flags_str, node.id, ui_str, brief_str, children_str,
         );
     }
 

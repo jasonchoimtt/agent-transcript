@@ -26,6 +26,18 @@ indicator             = "→"
 content               = { dim = true }
 indicator_style       = { fg = "muted" }
 error_indicator_style = { fg = "error" }
+file_path             = { bold = true }
+paginator             = { fg = "muted" }
+diff_stat             = { fg = "diff_stat" }
+diff_stat_removed     = { fg = "diff_removed_fg" }
+diff_stat_added       = { fg = "diff_added_fg" }
+diff_added            = { fg = "diff_added_fg",   bg = "diff_added_bg" }
+diff_removed          = { fg = "diff_removed_fg", bg = "diff_removed_bg" }
+diff_changed          = { fg = "diff_changed_fg", bg = "diff_changed_bg" }
+diff_context          = {}
+line_num              = { dim = true }
+stderr                = { fg = "error" }
+stdout                = {}
 
 [task_summary] # all defaults
 

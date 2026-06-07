@@ -9,6 +9,10 @@ use super::ansi::{clip_to_visual_width, visual_width};
 use super::markdown::{first_line_clipped, render_markdown};
 use super::state::{MessageType, UiState};
 use super::table::{TableUiState, render::render_table};
+use super::tool_result::{
+    ToolResultUiState,
+    render::{render_compact, render_tool_result},
+};
 use crate::theme::styles::{JsonStyle, MessageStyle, ToolCallStyle};
 use crate::theme::{ColorVar, Palette};
 
@@ -166,25 +170,72 @@ impl Widget for MessageWidget<'_> {
                 } else {
                     // Compact: render the brief summary as a single line.
                     let source = self.brief.unwrap_or("Table");
-                    let available = text_area.width as usize;
-                    let (clipped, truncated) = if visual_width(source) > available {
-                        (
-                            clip_to_visual_width(source, available.saturating_sub(1)).0,
-                            true,
-                        )
-                    } else {
-                        (source, false)
-                    };
-                    let mut spans = vec![Span::styled(
+                    let (clipped, truncated) = clip_brief(source, text_area.width as usize);
+                    let line = Line::from(Span::styled(
                         clipped,
                         table_style.cell.to_style(self.palette),
-                    )];
-                    if truncated {
-                        spans.push(Span::styled("…", Style::new().dim()));
+                    ));
+                    render_brief_line(text_area, buf, line, truncated, false, self.skip_lines);
+                }
+            }
+            MessageStyle::ToolResult(tr_style) => {
+                if self.show_more {
+                    if let Some(ts) = self
+                        .ui_state
+                        .and_then(|s| s.as_any().downcast_ref::<ToolResultUiState>())
+                    {
+                        render_tool_result(
+                            text_area,
+                            ts,
+                            self.interaction,
+                            self.palette,
+                            tr_style,
+                            buf,
+                            self.skip_lines,
+                        );
+                    } else {
+                        // No rich widget — fall through to plain text.
+                        let content_style = tr_style.content.to_style(self.palette);
+                        let mut text = display_text
+                            .into_text()
+                            .unwrap_or_else(|_| Text::raw(display_text));
+                        text.style = content_style;
+                        Paragraph::new(text)
+                            .wrap(Wrap { trim: false })
+                            .scroll((self.skip_lines, 0))
+                            .render(text_area, buf);
                     }
-                    Paragraph::new(Line::from(spans))
-                        .scroll((self.skip_lines, 0))
-                        .render(text_area, buf);
+                } else if let Some(ts) = self
+                    .ui_state
+                    .and_then(|s| s.as_any().downcast_ref::<ToolResultUiState>())
+                {
+                    render_compact(
+                        text_area,
+                        ts,
+                        self.palette,
+                        tr_style,
+                        buf,
+                        collapsed_with_children,
+                        self.skip_lines,
+                    );
+                } else {
+                    // Compact: render brief summary as a single line.
+                    let source = self
+                        .brief
+                        .unwrap_or_else(|| display_text.lines().next().unwrap_or(""));
+                    let (clipped, truncated) = clip_brief(source, text_area.width as usize);
+                    let line = Line::from(Span::styled(
+                        clipped,
+                        tr_style.content.to_style(self.palette),
+                    ));
+                    render_brief_line(
+                        text_area,
+                        buf,
+                        line,
+                        truncated,
+                        collapsed_with_children,
+                        self.skip_lines,
+                    );
                 }
             }
             other_style => {
@@ -199,11 +250,13 @@ impl Widget for MessageWidget<'_> {
                         s.resolve(self.xml_tag).content.to_style(self.palette)
                     }
                     MessageStyle::System(s) => s.content.to_style(self.palette),
-                    MessageStyle::ToolResult(s) => s.content.to_style(self.palette),
                     MessageStyle::Other(s) => {
                         s.resolve(self.xml_tag).content.to_style(self.palette)
                     }
-                    MessageStyle::ToolCall(_) | MessageStyle::Json(_) | MessageStyle::Table(_) => {
+                    MessageStyle::ToolCall(_)
+                    | MessageStyle::Json(_)
+                    | MessageStyle::Table(_)
+                    | MessageStyle::ToolResult(_) => {
                         unreachable!()
                     }
                 };
@@ -230,20 +283,12 @@ impl Widget for MessageWidget<'_> {
                         let source = self
                             .brief
                             .unwrap_or_else(|| display_text.lines().next().unwrap_or(""));
-                        let available = text_area.width as usize;
                         let more_lines =
                             self.brief.is_none() && display_text.lines().nth(1).is_some();
-                        let (clipped, truncated) = if visual_width(source) > available {
-                            (
-                                clip_to_visual_width(source, available.saturating_sub(1)).0,
-                                true,
-                            )
-                        } else {
-                            (source, false)
-                        };
+                        let (clipped, truncated) = clip_brief(source, text_area.width as usize);
                         // Parse ANSI codes so coloured content (e.g. bash-stdout) renders
                         // correctly; for plain text this just produces a single styled span.
-                        let mut line = clipped
+                        let line = clipped
                             .into_text()
                             .map(|t| {
                                 let mut l = t.lines.into_iter().next().unwrap_or_default();
@@ -253,14 +298,14 @@ impl Widget for MessageWidget<'_> {
                             .unwrap_or_else(|_| {
                                 Line::from(Span::styled(clipped.to_string(), content_style))
                             });
-                        if truncated || more_lines {
-                            line.spans.push(Span::styled("…", Style::new().dim()));
-                        } else if collapsed_with_children {
-                            line.spans.push(Span::styled("▾", Style::new().dim()));
-                        }
-                        Paragraph::new(vec![line])
-                            .scroll((self.skip_lines, 0))
-                            .render(text_area, buf);
+                        render_brief_line(
+                            text_area,
+                            buf,
+                            line,
+                            truncated || more_lines,
+                            collapsed_with_children,
+                            self.skip_lines,
+                        );
                     }
                 } else if is_markdown {
                     let rendered = render_markdown(display_text, self.palette);
@@ -296,6 +341,35 @@ impl Widget for MessageWidget<'_> {
             }
         }
     }
+}
+
+fn clip_brief(source: &str, available: usize) -> (&str, bool) {
+    if visual_width(source) > available {
+        (
+            clip_to_visual_width(source, available.saturating_sub(1)).0,
+            true,
+        )
+    } else {
+        (source, false)
+    }
+}
+
+fn render_brief_line<'a>(
+    text_area: Rect,
+    buf: &mut Buffer,
+    mut line: Line<'a>,
+    needs_ellipsis: bool,
+    collapsed: bool,
+    skip_lines: u16,
+) {
+    if needs_ellipsis {
+        line.spans.push(Span::styled("…", Style::new().dim()));
+    } else if collapsed {
+        line.spans.push(Span::styled("▾", Style::new().dim()));
+    }
+    Paragraph::new(vec![line])
+        .scroll((skip_lines, 0))
+        .render(text_area, buf);
 }
 
 /// Split a line on the first `:`, returning `(before, after_colon)`.
@@ -362,23 +436,16 @@ fn render_json(
     if !show_more {
         let source = brief.unwrap_or_else(|| display_text.lines().next().unwrap_or(""));
         let more_lines = brief.is_none() && display_text.lines().nth(1).is_some();
-        let (clipped, truncated) = if visual_width(source) > available {
-            (
-                clip_to_visual_width(source, available.saturating_sub(1)).0,
-                true,
-            )
-        } else {
-            (source, false)
-        };
-        let mut line = make_line(clipped);
-        if truncated || more_lines {
-            line.spans.push(Span::styled("…", Style::new().dim()));
-        } else if collapsed_with_children {
-            line.spans.push(Span::styled("▾", Style::new().dim()));
-        }
-        Paragraph::new(vec![line])
-            .scroll((skip_lines, 0))
-            .render(text_area, buf);
+        let (clipped, truncated) = clip_brief(source, available);
+        let line = make_line(clipped);
+        render_brief_line(
+            text_area,
+            buf,
+            line,
+            truncated || more_lines,
+            collapsed_with_children,
+            skip_lines,
+        );
     } else if kind == "string" {
         // First line is "key:" (split on ':' for coloring); remaining lines are
         // raw value content and must NOT be split again — they may contain ':'.
@@ -422,7 +489,7 @@ fn render_tool_call(
     if !show_more {
         let source = brief.unwrap_or_else(|| display_text.lines().next().unwrap_or(""));
 
-        let line = if tc.show_params_in_brief {
+        if tc.show_params_in_brief {
             if let Some((name_str, sep, params_str)) = split_at_first_sep(source) {
                 let (open, close): (&'static str, Option<&'static str>) = if sep == '(' {
                     ("(", Some(")"))
@@ -447,10 +514,14 @@ fn render_tool_call(
                     if let Some(c) = close {
                         spans.push(Span::styled(c, params_style));
                     }
-                    if collapsed_with_children {
-                        spans.push(Span::styled("▾", Style::new().dim()));
-                    }
-                    Line::from(spans)
+                    render_brief_line(
+                        text_area,
+                        buf,
+                        Line::from(spans),
+                        false,
+                        collapsed_with_children,
+                        skip_lines,
+                    );
                 } else {
                     let params_available = available.saturating_sub(overhead + 1);
                     let clipped = clip_to_visual_width(params_display, params_available).0;
@@ -463,23 +534,20 @@ fn render_tool_call(
                     if let Some(c) = close {
                         spans.push(Span::styled(c, params_style));
                     }
-                    Line::from(spans)
+                    render_brief_line(text_area, buf, Line::from(spans), false, false, skip_lines);
                 }
             } else {
                 // Plain text fallback (no separator found).
-                let truncated = visual_width(source) > available;
-                let (clipped, _) = if truncated {
-                    clip_to_visual_width(source, available.saturating_sub(1))
-                } else {
-                    (source, false)
-                };
-                let mut line = Line::from(Span::styled(clipped.to_owned(), name_style));
-                if truncated {
-                    line.spans.push(Span::styled("…", Style::new().dim()));
-                } else if collapsed_with_children {
-                    line.spans.push(Span::styled("▾", Style::new().dim()));
-                }
-                line
+                let (clipped, truncated) = clip_brief(source, available);
+                let line = Line::from(Span::styled(clipped.to_owned(), name_style));
+                render_brief_line(
+                    text_area,
+                    buf,
+                    line,
+                    truncated,
+                    collapsed_with_children,
+                    skip_lines,
+                );
             }
         } else {
             // Only show the tool name.
@@ -495,18 +563,16 @@ fn render_tool_call(
                 None => take,
             };
             let clipped_name = clip_to_visual_width(name_src, max_chars).0;
-            let mut line = Line::from(Span::styled(clipped_name.to_owned(), name_style));
-            if truncated {
-                line.spans.push(Span::styled("…", Style::new().dim()));
-            } else if collapsed_with_children {
-                line.spans.push(Span::styled("▾", Style::new().dim()));
-            }
-            line
-        };
-
-        Paragraph::new(vec![line])
-            .scroll((skip_lines, 0))
-            .render(text_area, buf);
+            let line = Line::from(Span::styled(clipped_name.to_owned(), name_style));
+            render_brief_line(
+                text_area,
+                buf,
+                line,
+                truncated,
+                collapsed_with_children,
+                skip_lines,
+            );
+        }
     } else {
         let mut lines: Vec<Line> = Vec::new();
         let mut text_lines = display_text.lines();

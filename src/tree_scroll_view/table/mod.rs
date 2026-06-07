@@ -182,6 +182,10 @@ impl UiState for TableUiState {
         self
     }
 
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     fn on_update(&self, new_message: &MessageState) -> Option<Box<dyn UiState>> {
         let new_ts = new_message
             .ui_state

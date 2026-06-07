@@ -145,6 +145,18 @@ pub struct ToolResultStyle {
     pub indicator_style: Option<SpanStyle>,
     pub error_indicator: Option<String>,
     pub error_indicator_style: Option<SpanStyle>,
+    pub file_path: SpanStyle,
+    pub paginator: SpanStyle,
+    pub diff_stat: SpanStyle,
+    pub diff_stat_removed: SpanStyle,
+    pub diff_stat_added: SpanStyle,
+    pub diff_added: SpanStyle,
+    pub diff_removed: SpanStyle,
+    pub diff_changed: SpanStyle,
+    pub diff_context: SpanStyle,
+    pub line_num: SpanStyle,
+    pub stderr: SpanStyle,
+    pub stdout: SpanStyle,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

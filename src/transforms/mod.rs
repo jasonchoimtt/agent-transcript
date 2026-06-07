@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::config::TransformsConfig;
+use crate::config::{FileDeltaWidgetConfig, TransformsConfig};
 use crate::event::Event;
 use crate::providers::ProviderKind;
 use crate::reader_op::ReaderOp;
@@ -12,16 +12,22 @@ pub mod markdown_splitter;
 pub mod table_converter;
 pub mod tool_formatter;
 pub mod tool_grouper;
+pub mod tool_result_enricher;
 pub mod ui_initializer;
 
 /// Build the ordered transform list from a `TransformsConfig`.
 ///
-/// Order: `UiInitializer` → `ToolFormatter` → `ToolGrouper` → `MarkdownSplitter` (opt-in) → `LuaTransform` (opt-in).
+/// Order: `UiInitializer` → `ToolFormatter` → `ToolResultEnricher` (Claude only) → `ToolGrouper` →
+///        `MarkdownSplitter` (opt-in) → `TableConverter` (opt-in) → `LuaTransform` (opt-in).
 /// ToolFormatter runs before ToolGrouper so that container labels can be derived from already-formatted child text.
+/// ToolResultEnricher runs before ToolGrouper so that when the grouper mirrors ToolResult children into its buffer,
+/// it captures already-enriched copies. If the enricher ran after the grouper, the container Replace would overwrite
+/// the enriched ToolResult children with the grouper's un-enriched stored copies.
 pub fn build_transforms(
     cfg: &TransformsConfig,
     provider: &ProviderKind,
     workspace_path: Option<&std::path::Path>,
+    file_delta_cfg: &FileDeltaWidgetConfig,
 ) -> Vec<Box<dyn Transform>> {
     let mut transforms: Vec<Box<dyn Transform>> = Vec::new();
     transforms.push(Box::new(ui_initializer::UiInitializer::new(
@@ -32,6 +38,12 @@ pub fn build_transforms(
         provider,
         workspace_path.map(|p| p.to_path_buf()),
     )));
+    if *provider == ProviderKind::Claude {
+        transforms.push(Box::new(tool_result_enricher::ToolResultEnricher::new(
+            file_delta_cfg,
+            workspace_path.map(|p| p.to_path_buf()),
+        )));
+    }
     transforms.push(Box::new(tool_grouper::ToolGrouper::new(
         cfg.tool_grouper.clone(),
     )));

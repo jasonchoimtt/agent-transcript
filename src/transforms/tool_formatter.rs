@@ -190,7 +190,7 @@ fn apply_filter(
 /// 1. Workspace-relative if under the session's workspace directory (shortest — often inside ~).
 /// 2. Home-relative (`~/foo/bar`) if under $HOME.
 /// 3. Original absolute path as fallback.
-fn filter_path(value: String, workspace_path: Option<&std::path::Path>) -> String {
+pub(crate) fn filter_path(value: String, workspace_path: Option<&std::path::Path>) -> String {
     use std::path::Path;
 
     let path = Path::new(&value);

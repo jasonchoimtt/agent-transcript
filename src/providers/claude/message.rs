@@ -678,7 +678,7 @@ fn handle_tool_results(
                 parent_id: Some(old_node_id),
                 message: MessageState::new(result_id)
                     .text(result_text)
-                    .data(serde_json::json!({ "call": call_block, "result": block }).to_string())
+                    .data(entry.to_string())
                     .message_type(MessageType::ToolResult)
                     .tag(status_tag),
             });

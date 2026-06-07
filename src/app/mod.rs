@@ -640,7 +640,12 @@ impl App {
         provider: &crate::providers::ProviderKind,
         workspace_path: Option<&std::path::Path>,
     ) -> Vec<Box<dyn crate::transforms::Transform>> {
-        build_transforms(&self.config.transforms, provider, workspace_path)
+        build_transforms(
+            &self.config.transforms,
+            provider,
+            workspace_path,
+            &self.config.widgets.tool_result.file_delta,
+        )
     }
 
     fn agent_config(&self, provider: &ProviderKind) -> &AgentConfig {

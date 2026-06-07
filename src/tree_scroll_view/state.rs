@@ -27,6 +27,7 @@ pub trait UiState: Send + 'static {
     fn clone_box(&self) -> Box<dyn UiState>;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn type_name(&self) -> &'static str;
     /// Called when the node this state belongs to is replaced. Return the state
     /// to install on the updated node, or `None` to discard (default).
     fn on_update(&self, _new_message: &MessageState) -> Option<Box<dyn UiState>> {

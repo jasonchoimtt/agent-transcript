@@ -7,6 +7,7 @@ pub mod predicates;
 pub mod sample;
 pub mod state;
 pub mod table;
+pub mod tool_result;
 #[cfg(test)]
 mod tests;
 pub mod ui;

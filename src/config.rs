@@ -9,6 +9,26 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub theme: ThemeConfig,
+    #[serde(default)]
+    pub widgets: WidgetsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WidgetsConfig {
+    #[serde(default)]
+    pub tool_result: ToolResultWidgetConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ToolResultWidgetConfig {
+    #[serde(default)]
+    pub file_delta: FileDeltaWidgetConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct FileDeltaWidgetConfig {
+    /// Number of context lines to show around each change block. None = show all.
+    pub context_lines: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
