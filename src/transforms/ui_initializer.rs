@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_tag_collapsed_by_default() {
+    fn attachment_tag_collapsed_and_hidden_by_default() {
         let mut init = default_init();
         let ops = vec![make_append_with_tag(
             "a",
@@ -240,8 +240,8 @@ mod tests {
         let msg = get_message(out.into_iter().next().unwrap());
         assert_eq!(
             msg.hidden,
-            HiddenState::NotHidden,
-            "attachment nodes should be visible"
+            HiddenState::Hidden,
+            "attachment nodes should be hidden"
         );
         assert!(!msg.expanded, "attachment nodes should be collapsed");
         assert!(!msg.show_more, "attachment nodes should not show_more");

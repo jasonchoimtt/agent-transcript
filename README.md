@@ -133,16 +133,16 @@ tags = {
 
 Message types:
 
-| Message type | Supported tags     |
-|--------------|--------------------|
-| UserMessage  | `attachment`       |
-| AgentMessage |                    |
-| ToolCall     | `success`, `error` |
-| ToolResult   |                    |
-| Thinking     | `redacted`         |
-| Container    |                    |
-| TaskSummary  |                    |
-| System       |                    |
+| Message type | Supported tags          |
+|--------------|-------------------------|
+| UserMessage  | `attachment`, `summary` |
+| AgentMessage |                         |
+| ToolCall     | `success`, `error`      |
+| ToolResult   |                         |
+| Thinking     | `redacted`              |
+| Container    |                         |
+| TaskSummary  |                         |
+| System       |                         |
 
 ### Transform: Tool formatter
 

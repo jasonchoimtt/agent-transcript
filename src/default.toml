@@ -13,7 +13,8 @@ show_more = false
 [transforms.ui_initializer.types.UserMessage]
 expanded = true
 show_more = true
-tags.attachment = { expanded = false, show_more = false }
+tags.attachment = { expanded = false, show_more = false, hidden = true }
+tags.summary = { expanded = false, show_more = false }
 
 [transforms.ui_initializer.types.AgentMessage]
 expanded = true
