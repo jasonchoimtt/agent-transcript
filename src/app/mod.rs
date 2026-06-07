@@ -43,6 +43,7 @@ pub enum StartMode {
 }
 
 /// Which in-status-bar confirmation prompt (if any) is active.
+#[derive(PartialEq)]
 pub enum ConfirmKind {
     /// Ctrl-K: asking the user whether to kill the live terminal.
     Kill,
@@ -58,6 +59,19 @@ pub enum ConfirmKind {
     ReaderRestart,
     /// Ctrl-D: start writing debug logs to /tmp/agent-transcript.log.
     DebugLog,
+}
+
+/// Input-routing mode for the transcript screen.
+#[derive(PartialEq)]
+pub enum AppMode {
+    /// Normal scrolling/navigation; keys go to the tree.
+    Normal,
+    /// The embedded terminal pane has keyboard focus.
+    Terminal,
+    /// Key events are routed to the selected interactive widget (e.g. a table).
+    MessageInteraction,
+    /// An in-status-bar confirmation prompt is waiting for y/n.
+    Confirm(ConfirmKind),
 }
 
 pub struct App {
@@ -76,16 +90,15 @@ pub struct App {
     transcript_open: bool,
     /// When true, the next `TerminalExited` event closes the app.
     quit_intent: bool,
-    /// Active confirmation prompt shown in the status bar.
-    confirm_prompt: Option<ConfirmKind>,
+    /// Current input-routing mode (replaces the old separate confirm_prompt / message_interaction
+    /// / terminal.active flags).
+    mode: AppMode,
     /// Transient message shown in the status bar; auto-dismissed after 5 s.
     /// The bool indicates whether to use warning style (yellow) vs regular style.
     flash_message: Option<(String, bool, std::time::Instant)>,
     config: Config,
     data_view: Option<DataViewState>,
     providers: Arc<Vec<Box<dyn Provider>>>,
-    /// True while message-interaction mode is active (key events routed to the selected widget).
-    message_interaction: bool,
     /// ID of the most-recently spawned terminal.  Each launch increments this
     /// so `TerminalExited` events from a killed predecessor are ignored.
     terminal_id: u64,
@@ -126,13 +139,12 @@ impl App {
             picker_state: PickerState::new(),
             transcript_open: false,
             quit_intent: false,
-            confirm_prompt: None,
+            mode: AppMode::Normal,
             flash_message: None,
             config,
             data_view: None,
             providers: PickerState::default_providers(),
             terminal_id: 0,
-            message_interaction: false,
             status_bar_debug: false,
             log_buffer,
             last_session: None,
@@ -292,8 +304,8 @@ impl App {
                     use crossterm::event::MouseEventKind;
                     match ev.kind {
                         MouseEventKind::ScrollUp => {
-                            if self.terminal.active {
-                                self.terminal.active = false;
+                            if self.mode == AppMode::Terminal {
+                                self.mode = AppMode::Normal;
                                 let _ = std::io::stdout().write_all(b"\x1b[0 q");
                                 let _ = std::io::stdout().flush();
                             }
@@ -303,7 +315,7 @@ impl App {
                             self.tree_state.scroll_down(3);
                         }
                         _ => {
-                            if self.terminal.active {
+                            if self.mode == AppMode::Terminal {
                                 let translated = self.tree_state.translate_mouse_to_pty(ev);
                                 if let Some(term) = self.terminal.live_ts()
                                     && term.mouse_mode != MouseMode::Off
@@ -382,7 +394,7 @@ impl App {
     }
 
     fn handle_terminal_output(&mut self, bytes: Vec<u8>) {
-        let active = self.terminal.active;
+        let active = self.mode == AppMode::Terminal;
         let Some(term) = self.terminal.live_ts() else {
             return;
         };
@@ -439,7 +451,9 @@ impl App {
         info!(code = ?code, "terminal exited");
         if self.terminal.is_live() {
             self.terminal.transition_to_exited(code);
-            self.terminal.active = false;
+            if self.mode == AppMode::Terminal {
+                self.mode = AppMode::Normal;
+            }
             let _ = std::io::stdout().write_all(b"\x1b[0 q");
             let _ = std::io::stdout().flush();
         }
@@ -501,11 +515,12 @@ impl App {
         }
     }
 
-    /// Set terminal active, move selection to terminal node, apply cursor shape.
+    /// Give keyboard focus to the terminal pane and move tree selection to the terminal node.
     fn activate_terminal(&mut self) {
         self.tree_state.key_parser.reset();
         self.tree_state.select_terminal_node();
-        self.terminal.activate();
+        self.mode = AppMode::Terminal;
+        self.terminal.apply_cursor_shape();
     }
 
     /// Perform a session switch to `entry` unconditionally.
@@ -533,9 +548,9 @@ impl App {
             .await;
         self.terminal = TerminalPanel {
             state: PanelState::Uninitialized(info),
-            active: false,
             expanded: false,
         };
+        self.mode = AppMode::Normal;
         self.transcript_open = true;
         self.screen = AppScreen::Transcript;
     }
@@ -789,7 +804,6 @@ mod tests {
                 ts: Box::new(ts),
                 socket,
             },
-            active: false,
             expanded: false,
         }
     }
@@ -822,7 +836,6 @@ mod tests {
                 ts: Box::new(ts),
                 socket,
             },
-            active: false,
             expanded: false,
         };
         assert!(matches!(app.terminal.state, PanelState::Live { .. }));
@@ -886,14 +899,14 @@ mod tests {
         let mut app = picker_app().await;
         app.terminal = sh_live_panel(&app);
         app.quit_intent = true;
-        app.terminal.active = true;
+        app.mode = AppMode::Terminal;
 
         // Simulate Ctrl-O: deactivate and clear quit intent.
-        app.terminal.active = false;
+        app.mode = AppMode::Normal;
         app.quit_intent = false;
 
         assert!(!app.quit_intent);
-        assert!(!app.terminal.active);
+        assert!(app.mode == AppMode::Normal);
     }
 
     // ── Quit intent set: TerminalExited closes app ─────────────────────────

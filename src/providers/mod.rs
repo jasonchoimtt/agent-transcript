@@ -79,7 +79,7 @@ impl ProviderKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptEntry {
     pub path: PathBuf,
     pub id: String,

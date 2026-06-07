@@ -8,7 +8,7 @@ use crate::status_bar::StatusBar;
 use crate::terminal::PanelState;
 use crate::tree_scroll_view::TreeScrollView;
 
-use crate::app::{App, AppScreen};
+use crate::app::{App, AppMode, AppScreen};
 
 impl App {
     pub(super) fn draw(&mut self, tui: &mut DefaultTerminal) -> color_eyre::Result<Option<Rect>> {
@@ -57,7 +57,7 @@ impl App {
                 pty_rows,
             );
 
-            let terminal_active = self.terminal.active;
+            let terminal_active = self.mode == AppMode::Terminal;
             let terminal_expanded = self.terminal.expanded;
             let pane_ref = self.terminal.pane_ref();
 
@@ -67,7 +67,7 @@ impl App {
                 terminal_expanded,
                 terminal_active,
                 theme: &self.theme,
-                message_interaction: self.message_interaction,
+                message_interaction: self.mode == AppMode::MessageInteraction,
             }
             .render(chunks[0], frame.buffer_mut(), &mut self.tree_state);
 
@@ -95,11 +95,9 @@ impl App {
                     .flash_message
                     .as_ref()
                     .map(|(msg, warn, _)| (msg.as_str(), *warn)),
-                confirm_prompt: self.confirm_prompt.as_ref(),
-                terminal_active: self.terminal.active,
+                mode: &self.mode,
                 terminal_live: self.terminal.is_live(),
                 terminal_expanded: self.terminal.expanded,
-                message_interaction: self.message_interaction,
                 data_view_open: self.data_view.is_some(),
                 debug: self.status_bar_debug,
                 tree_state: &self.tree_state,

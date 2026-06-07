@@ -15,7 +15,7 @@ use crate::terminal::PanelState;
 use crate::terminal::keys::key_event_to_bytes;
 use crate::tree_scroll_view::{ComponentKeyResult, TreeAction};
 
-use crate::app::{App, AppScreen, ConfirmKind};
+use crate::app::{App, AppMode, AppScreen, ConfirmKind};
 
 impl App {
     pub(super) async fn handle_key(&mut self, key: KeyEvent, last_area: Rect) {
@@ -58,7 +58,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.confirm_prompt = Some(ConfirmKind::SessionSwitch(entry));
+                    self.mode = AppMode::Confirm(ConfirmKind::SessionSwitch(entry));
                 } else {
                     self.do_session_switch(entry).await;
                 }
@@ -71,7 +71,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.confirm_prompt = Some(ConfirmKind::SessionSwitchAndResume(entry));
+                    self.mode = AppMode::Confirm(ConfirmKind::SessionSwitchAndResume(entry));
                 } else {
                     self.do_session_switch(entry).await;
                     self.try_launch_deferred_terminal();
@@ -86,7 +86,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.confirm_prompt = Some(ConfirmKind::NewSession(provider));
+                    self.mode = AppMode::Confirm(ConfirmKind::NewSession(provider));
                 } else {
                     self.do_new_session(provider);
                 }
@@ -95,13 +95,13 @@ impl App {
     }
 
     async fn handle_transcript_screen_key(&mut self, key: KeyEvent, last_area: Rect) {
-        if self.confirm_prompt.is_some() {
+        if matches!(self.mode, AppMode::Confirm(_)) {
             self.handle_confirm_key(key).await;
         } else if self.data_view.is_some() {
             self.handle_data_view_key(key, last_area).await;
-        } else if self.message_interaction {
+        } else if self.mode == AppMode::MessageInteraction {
             self.handle_message_interaction_key(key, last_area).await;
-        } else if self.terminal.active {
+        } else if self.mode == AppMode::Terminal {
             self.handle_terminal_key(key).await;
         } else {
             self.handle_normal_key(key, last_area).await;
@@ -114,8 +114,11 @@ impl App {
     async fn handle_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                // confirm_prompt is guaranteed Some by the call-site guard.
-                match self.confirm_prompt.take().unwrap() {
+                let AppMode::Confirm(kind) = std::mem::replace(&mut self.mode, AppMode::Normal)
+                else {
+                    return;
+                };
+                match kind {
                     ConfirmKind::Kill => {
                         if let Some(ts) = self.terminal.live_ts() {
                             ts.kill();
@@ -165,7 +168,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm_prompt = None;
+                self.mode = AppMode::Normal;
             }
             _ => {}
         }
@@ -206,7 +209,7 @@ impl App {
         if self.tree_state.is_interaction_supported() {
             match self.tree_state.apply_component_key(key) {
                 ComponentKeyResult::ExitInteraction => {
-                    self.message_interaction = false;
+                    self.mode = AppMode::Normal;
                     self.tree_state.precedence =
                         crate::tree_scroll_view::state::Precedence::Selection;
                 }
@@ -230,7 +233,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             // Ctrl-O: deactivate terminal, also clear quit intent.
-            self.terminal.active = false;
+            self.mode = AppMode::Normal;
             self.quit_intent = false;
             let _ = std::io::stdout().write_all(b"\x1b[0 q");
             let _ = std::io::stdout().flush();
@@ -275,7 +278,7 @@ impl App {
                                 std::time::Instant::now(),
                             ));
                         } else {
-                            self.confirm_prompt = Some(ConfirmKind::DebugLog);
+                            self.mode = AppMode::Confirm(ConfirmKind::DebugLog);
                         }
                     }
                     KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -287,7 +290,7 @@ impl App {
                         if !key.modifiers.contains(KeyModifiers::CONTROL)
                             && self.last_session.is_some() =>
                     {
-                        self.confirm_prompt = Some(ConfirmKind::ReaderRestart);
+                        self.mode = AppMode::Confirm(ConfirmKind::ReaderRestart);
                     }
                     _ => {}
                 }
@@ -344,7 +347,7 @@ impl App {
         {
             // Ctrl-K: kill confirmation (only when live).
             if self.terminal.is_live() {
-                self.confirm_prompt = Some(ConfirmKind::Kill);
+                self.mode = AppMode::Confirm(ConfirmKind::Kill);
             }
         } else {
             let action = self
@@ -382,7 +385,7 @@ impl App {
             }
             // Interactive component (e.g. table): Enter enters message interaction mode.
             TreeAction::ToggleExpand if self.tree_state.is_interaction_supported() => {
-                self.message_interaction = true;
+                self.mode = AppMode::MessageInteraction;
                 self.tree_state.enter_component_focus();
             }
             // Terminal node overrides: Enter toggle the PTY pane.

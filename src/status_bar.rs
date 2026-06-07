@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::app::ConfirmKind;
+use crate::app::{AppMode, ConfirmKind};
 use crate::terminal::crop::CollapsedCrop;
 use crate::tree_scroll_view::TreeScrollViewState;
 use crate::tree_scroll_view::state::Precedence;
@@ -12,14 +12,11 @@ use crate::tree_scroll_view::state::Precedence;
 pub struct StatusBar<'a> {
     /// Transient flash: (message, is_warning). Warning uses yellow; non-warning uses base style.
     pub flash: Option<(&'a str, bool)>,
-    pub confirm_prompt: Option<&'a ConfirmKind>,
-    pub terminal_active: bool,
+    pub mode: &'a AppMode,
     /// True when a live PTY is running (regardless of active/focused state).
     pub terminal_live: bool,
     /// True when the terminal pane is expanded (showing extra scrollback rows).
     pub terminal_expanded: bool,
-    /// True when message-interaction mode is active (routed to selected widget).
-    pub message_interaction: bool,
     /// True when the raw data-view overlay is open.
     pub data_view_open: bool,
     /// When true, show the debug info bar instead of key hints (toggled by Shift-D).
@@ -52,7 +49,7 @@ impl Widget for StatusBar<'_> {
 
         // Confirmation prompts override hints.
         let confirm_style = Style::default().fg(Color::White).bg(self.primary);
-        if let Some(prompt) = self.confirm_prompt {
+        if let AppMode::Confirm(prompt) = self.mode {
             let text = match prompt {
                 ConfirmKind::Kill => " Kill session? (Y/n)",
                 ConfirmKind::SessionSwitch(_) | ConfirmKind::SessionSwitchAndResume(_) => {
@@ -121,10 +118,10 @@ impl StatusBar<'_> {
         Vec<(&'static str, &'static str)>,
         Option<Vec<(&'static str, &'static str)>>,
     ) {
-        if self.data_view_open || self.message_interaction {
+        if self.data_view_open || self.mode == &AppMode::MessageInteraction {
             // (c) data view or interaction mode: only escape available
             (vec![("Esc", "Back")], None)
-        } else if self.terminal_active {
+        } else if self.mode == &AppMode::Terminal {
             // (a) terminal is focused — only way out is Ctrl-O
             (vec![("Ctrl-O", "Normal")], None)
         } else if self.terminal_live {

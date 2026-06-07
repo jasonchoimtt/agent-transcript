@@ -51,8 +51,6 @@ pub enum PanelState {
 /// Owns the embedded PTY pane and its display state.
 pub struct TerminalPanel {
     pub state: PanelState,
-    /// Whether the terminal pane has keyboard/mouse focus.
-    pub active: bool,
     /// Whether the scrollback region is expanded above the live view.
     pub expanded: bool,
 }
@@ -61,7 +59,6 @@ impl TerminalPanel {
     pub fn absent() -> Self {
         Self {
             state: PanelState::Absent,
-            active: false,
             expanded: false,
         }
     }
@@ -96,14 +93,6 @@ impl TerminalPanel {
             PanelState::Live { ts, .. } => Some(ts),
             _ => None,
         }
-    }
-
-    /// Returns `&mut TerminalState` only when both `Live` and `active`.
-    pub fn active_live_ts(&mut self) -> Option<&mut TerminalState> {
-        if !self.active {
-            return None;
-        }
-        self.live_ts()
     }
 
     /// Builds a `TerminalPaneRef` for the tree scroll view renderer.
@@ -239,9 +228,9 @@ impl TerminalPanel {
         Some(format!(" {}:{} ", info.provider.cli_command(), short))
     }
 
-    pub fn activate(&mut self) {
+    /// Apply the PTY cursor shape to the host terminal (call after entering Terminal mode).
+    pub fn apply_cursor_shape(&mut self) {
         if let PanelState::Live { ts: term, .. } = &mut self.state {
-            self.active = true;
             term.apply_cursor_shape();
         }
     }
@@ -292,7 +281,6 @@ mod tests {
                 ts: Box::new(ts),
                 socket,
             },
-            active: false,
             expanded: false,
         }
     }
@@ -307,14 +295,12 @@ mod tests {
     #[test]
     fn transition_to_exited_preserves_display_state() {
         let mut panel = sh_live_panel();
-        panel.active = true;
         panel.expanded = true;
         panel.transition_to_exited(Some(0));
         assert!(matches!(
             panel.state,
             PanelState::Exited { code: Some(0), .. }
         ));
-        assert!(panel.active);
         assert!(panel.expanded);
     }
 
@@ -340,20 +326,10 @@ mod tests {
                 code: Some(0),
                 info,
             },
-            active: true,
             expanded: false,
         };
-        // try_relaunch will fail (claude CLI not installed), but active must remain true.
+        // try_relaunch will fail (claude CLI not installed), but expanded must remain false.
         panel.try_relaunch(sh_sender(), 1);
-        assert!(panel.active);
-    }
-
-    #[test]
-    fn active_live_ts_gated_by_active_flag() {
-        let mut panel = sh_live_panel();
-        panel.active = false;
-        assert!(panel.active_live_ts().is_none());
-        panel.active = true;
-        assert!(panel.active_live_ts().is_some());
+        assert!(!panel.expanded);
     }
 }
