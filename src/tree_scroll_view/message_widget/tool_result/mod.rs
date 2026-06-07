@@ -236,24 +236,48 @@ pub fn build_diff_lines(
         }
         let block = &lines[block_start..i];
 
+        let mut hunks: Vec<(Vec<&str>, Vec<&str>)> = Vec::new();
+        let mut hunk: Option<(Vec<&str>, Vec<&str>)> = None;
+        for line in block {
+            match line.chars().next() {
+                Some('+') | Some('-') => {
+                    if hunk.is_none() {
+                        hunk = Some((Vec::new(), Vec::new()));
+                    }
+                    if let Some((ref mut removed, ref mut added)) = hunk {
+                        if let Some(rest) = line.strip_prefix('-') {
+                            removed.push(rest);
+                        }
+                        if let Some(rest) = line.strip_prefix('+') {
+                            added.push(rest);
+                        }
+                    }
+                }
+                _ => {
+                    let h = std::mem::replace(&mut hunk, None);
+                    if let Some(h) = h {
+                        hunks.push(h);
+                    }
+                }
+            }
+        }
+        {
+            let h = std::mem::replace(&mut hunk, None);
+            if let Some(h) = h {
+                hunks.push(h);
+            }
+        }
+
         let added_count = block.iter().filter(|l| l.starts_with('+')).count();
         let use_full = show_full || block.len() <= 10 || added_count == 0;
 
-        for line in block {
-            if let Some(rest) = line.strip_prefix('+') {
-                let kind = if use_full {
-                    DiffLineKind::Added
-                } else {
-                    DiffLineKind::Changed
-                };
-                raw_lines.push((kind, rest));
-            } else if let Some(rest) = line.strip_prefix('-') {
-                let kind = if use_full {
-                    DiffLineKind::Removed
-                } else {
-                    DiffLineKind::RemovedHidden
-                };
-                raw_lines.push((kind, rest));
+        for (removed, added) in hunks {
+            if !use_full && !removed.is_empty() && !added.is_empty() {
+                raw_lines.extend(removed.iter().map(|r| (DiffLineKind::RemovedHidden, *r)));
+                raw_lines.extend(added.iter().map(|r| (DiffLineKind::Changed, *r)));
+            } else {
+                raw_lines.extend(removed.iter().map(|r| (DiffLineKind::Removed, *r)));
+                raw_lines.extend(added.iter().map(|r| (DiffLineKind::Added, *r)));
             }
         }
     }

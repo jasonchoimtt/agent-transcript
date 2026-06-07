@@ -91,7 +91,15 @@ impl ToolResultEnricher {
         let file_path = filter_path(raw_path, self.workspace_path.as_deref());
         let patch_arr = result.get("structuredPatch")?.as_array()?;
 
-        let hunks: Vec<PatchHunk> = patch_arr.iter().filter_map(parse_hunk).collect();
+        let mut hunks: Vec<PatchHunk> = patch_arr.iter().filter_map(parse_hunk).collect();
+
+        if hunks.is_empty() && result.get("type").and_then(|v| v.as_str()) == Some("create") {
+            if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
+                if !content.is_empty() {
+                    hunks = vec![make_create_hunk(content)];
+                }
+            }
+        }
 
         if hunks.is_empty() {
             return None;
@@ -125,6 +133,18 @@ impl ToolResultEnricher {
             hunks,
             self.context_lines,
         ))
+    }
+}
+
+fn make_create_hunk(content: &str) -> PatchHunk {
+    let lines: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
+    let new_lines = lines.len() as u32;
+    PatchHunk {
+        lines,
+        old_start: 0,
+        old_lines: 0,
+        new_start: 1,
+        new_lines,
     }
 }
 
@@ -504,6 +524,69 @@ mod tests {
                 assert_eq!(fd.hunks[0].old_start, 1);
             }
         }
+    }
+
+    #[test]
+    fn create_type_generates_hunk_from_content() {
+        let mut e = enricher();
+        let json = r#"{
+            "toolUseResult": {
+                "content": "fn main() {}\n",
+                "filePath": "/src/main.rs",
+                "originalFile": null,
+                "structuredPatch": [],
+                "type": "create",
+                "userModified": false
+            }
+        }"#;
+        let op = TreeOperation::Append {
+            parent_id: None,
+            message: tool_result_msg("cr", json),
+        };
+        let out = e.process(vec![op]);
+        if let TreeOperation::Append { message, .. } = &out[0] {
+            assert!(message.show_more);
+            let ui = message
+                .ui_state
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ToolResultUiState>()
+                .unwrap();
+            if let ToolResultPayload::FileDelta(fd) = &ui.payload {
+                assert_eq!(fd.file_path, "/src/main.rs");
+                assert_eq!(fd.hunks.len(), 1);
+                assert_eq!(fd.hunks[0].old_start, 0);
+                assert_eq!(fd.hunks[0].old_lines, 0);
+                assert_eq!(fd.hunks[0].new_start, 1);
+                assert_eq!(fd.hunks[0].lines, vec!["+fn main() {}"]);
+            } else {
+                panic!("expected FileDelta");
+            }
+        } else {
+            panic!("expected Append");
+        }
+    }
+
+    #[test]
+    fn create_type_empty_content_passthrough() {
+        let mut e = enricher();
+        let json = r#"{
+            "toolUseResult": {
+                "content": "",
+                "filePath": "/src/empty.rs",
+                "structuredPatch": [],
+                "type": "create"
+            }
+        }"#;
+        let op = TreeOperation::Append {
+            parent_id: None,
+            message: tool_result_msg("cre", json),
+        };
+        let out = e.process(vec![op]);
+        assert!(
+            matches!(&out[0], TreeOperation::Append { message, .. } if message.ui_state.is_none())
+        );
     }
 
     #[test]
