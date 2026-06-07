@@ -7,8 +7,8 @@ use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
 
 pub struct ToolFormatter {
-    /// Compiled (patterns, template) pairs, already filtered for this provider.
-    rules: Vec<(Vec<Pattern>, String)>,
+    /// Compiled (patterns, template, expanded_override) tuples, already filtered for this provider.
+    rules: Vec<(Vec<Pattern>, String, Option<bool>)>,
     workspace_path: Option<std::path::PathBuf>,
 }
 
@@ -31,7 +31,7 @@ impl ToolFormatter {
                     .iter()
                     .filter_map(|t| Pattern::new(t).ok())
                     .collect();
-                (patterns, r.template)
+                (patterns, r.template, r.expanded)
             })
             .collect();
         Self {
@@ -63,19 +63,24 @@ impl ToolFormatter {
         let props = msg.props.as_ref();
 
         // Find the first matching rule.
-        let template = self.rules.iter().find_map(|(patterns, tmpl)| {
+        let matched = self.rules.iter().find_map(|(patterns, tmpl, expanded)| {
             if patterns.iter().any(|p| p.matches(&tool_name)) {
-                Some(tmpl.as_str())
+                Some((tmpl.as_str(), *expanded))
             } else {
                 None
             }
         });
 
+        // Apply expanded override before formatting text.
+        if let Some((_, Some(expanded))) = matched {
+            msg.expanded = expanded;
+        }
+
         // Build the first-line summary and per-prop lines.
         let (summary, prop_lines) = build_display(props);
 
-        let first_line = match template {
-            Some(tmpl) => {
+        let first_line = match matched {
+            Some((tmpl, _)) => {
                 let rendered = render_template(tmpl, props, self.workspace_path.as_deref());
                 format!("{tool_name}({rendered})")
             }
@@ -373,6 +378,7 @@ mod tests {
                 providers: None,
                 tools: vec!["Bash".to_string()],
                 template: "{{command}}".to_string(),
+                expanded: None,
             }],
             disable_defaults: true,
             ..Default::default()
@@ -443,6 +449,7 @@ mod tests {
                 providers: None,
                 tools: vec!["Bash".to_string()],
                 template: "{{command}}".to_string(),
+                expanded: None,
             }],
             disable_defaults: true,
             ..Default::default()
@@ -478,6 +485,7 @@ mod tests {
                 providers: Some(vec!["claude".to_string()]),
                 tools: vec!["WebSearch".to_string()],
                 template: "{{query}}".to_string(),
+                expanded: None,
             }],
             disable_defaults: true,
             ..Default::default()
@@ -550,12 +558,91 @@ mod tests {
     }
 
     #[test]
+    fn expanded_true_sets_show_more() {
+        let config = ToolFormatterConfig {
+            rules: vec![ToolFormatterRule {
+                providers: None,
+                tools: vec!["Bash".to_string()],
+                template: "{{command}}".to_string(),
+                expanded: Some(true),
+            }],
+            disable_defaults: true,
+            ..Default::default()
+        };
+        let mut fmt = ToolFormatter::new(config, &ProviderKind::Claude, None);
+        let msg = make_tool_call("Bash", Some(serde_json::json!({"command": "ls"})));
+        let ops = fmt.process(vec![TreeOperation::Append {
+            parent_id: None,
+            message: msg,
+        }]);
+        let TreeOperation::Append { message, .. } = &ops[0] else {
+            panic!("expected Append");
+        };
+        assert!(message.expanded, "expanded=true must set expanded=true");
+    }
+
+    #[test]
+    fn expanded_false_clears_show_more() {
+        let config = ToolFormatterConfig {
+            rules: vec![ToolFormatterRule {
+                providers: None,
+                tools: vec!["Bash".to_string()],
+                template: "{{command}}".to_string(),
+                expanded: Some(false),
+            }],
+            disable_defaults: true,
+            ..Default::default()
+        };
+        let mut fmt = ToolFormatter::new(config, &ProviderKind::Claude, None);
+        // Start with expanded = true to verify it gets cleared.
+        let mut msg = make_tool_call("Bash", Some(serde_json::json!({"command": "ls"})));
+        msg.expanded = true;
+        let ops = fmt.process(vec![TreeOperation::Append {
+            parent_id: None,
+            message: msg,
+        }]);
+        let TreeOperation::Append { message, .. } = &ops[0] else {
+            panic!("expected Append");
+        };
+        assert!(!message.expanded, "expanded=false must set expanded=false");
+    }
+
+    #[test]
+    fn expanded_none_leaves_show_more_unchanged() {
+        let config = ToolFormatterConfig {
+            rules: vec![ToolFormatterRule {
+                providers: None,
+                tools: vec!["Bash".to_string()],
+                template: "{{command}}".to_string(),
+                expanded: None,
+            }],
+            disable_defaults: true,
+            ..Default::default()
+        };
+        let mut fmt = ToolFormatter::new(config, &ProviderKind::Claude, None);
+        let mut msg = make_tool_call("Bash", Some(serde_json::json!({"command": "ls"})));
+        msg.show_more = true; // pre-set show_more; should survive (expanded=None must not touch it)
+        let ops = fmt.process(vec![TreeOperation::Append {
+            parent_id: None,
+            message: msg,
+        }]);
+        let TreeOperation::Append { message, .. } = &ops[0] else {
+            panic!("expected Append");
+        };
+        assert!(
+            message.show_more,
+            "expanded=None must not modify existing expanded"
+        );
+    }
+
+    #[test]
     fn formatter_applies_rule_to_update() {
         let config = ToolFormatterConfig {
             rules: vec![ToolFormatterRule {
                 providers: None,
                 tools: vec!["Bash".to_string()],
                 template: "{{command}}".to_string(),
+                expanded: None,
             }],
             disable_defaults: true,
             ..Default::default()

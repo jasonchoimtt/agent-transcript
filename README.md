@@ -146,7 +146,7 @@ Message types:
 
 ### Transform: Tool formatter
 
-The tool formatter allow customizing the format of the `Bracket(param)` line of a tool call.
+The tool formatter allows customizing the format of the `Tool(param)` line of a tool call.
 
 Example:
 
@@ -156,6 +156,20 @@ providers = ["cursor"]
 tools = ["Shell"]
 template = "{{command}}"
 ```
+
+The optional `expanded` flag overrides whether the matched tool call is shown expanded (`show_more = true`) or collapsed, regardless of success or failure:
+
+```toml
+[[transforms.tool_formatter.rules]]
+providers = ["claude"]
+tools = ["Write", "Edit"]
+template = "{{file_path|path}}"
+expanded = true   # always show content, even on success
+```
+
+- `expanded = true` — set `expanded = true` on the tool call node even when it succeeds
+- `expanded = false` — set `expanded = false` even when it fails
+- omitted — no override (default: `expanded = false`, overridden to `true` on failure by UiInitializer)
 
 To disable default rules:
 
@@ -168,7 +182,7 @@ NOTE: Make sure you use `[[transforms.tool_formatter.rules]]` rather than `[[tra
 
 ### Transform: Tool grouper
 
-The tool grouper allows grouping of tool calls by tool name.
+The tool grouper allows grouping of consecutive matching tool calls into a collapsible container.
 
 Example:
 
@@ -180,6 +194,12 @@ min_count = 2
 expanded = false
 shorten_as_glob = true
 ```
+
+The optional `expanded` flag controls whether the sealed container shows its children expanded:
+
+- `expanded = true` — children always visible (e.g. useful for file-write or shell groups)
+- `expanded = false` — children always hidden
+- omitted — error-aware: expand if any child tool failed, otherwise collapse
 
 To disable default groups:
 

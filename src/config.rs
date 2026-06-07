@@ -174,8 +174,11 @@ pub struct ToolGroup {
     /// Minimum consecutive matches before grouping fires; default 2.
     #[serde(default = "ToolGroup::default_min_count")]
     pub min_count: usize,
+    /// Override the sealed container's `expanded` (children-visible) state.
+    /// `true` = always expand; `false` = always collapse; absent = error-aware
+    /// (expand if any child has an error tag, otherwise collapse).
     #[serde(default)]
-    pub expanded: bool,
+    pub expanded: Option<bool>,
     /// When true, the container label compresses child params as a brace-glob
     /// (e.g. `src/{app.rs,foo/bar.rs}`) instead of a comma-joined list.
     #[serde(default)]
@@ -221,6 +224,10 @@ pub struct ToolFormatterRule {
     pub tools: Vec<String>,
     /// Template string using `{{key}}` placeholders resolved against the tool's `props`.
     pub template: String,
+    /// Override the matched ToolCall's `show_more` state.
+    /// `true` = expand even on success; `false` = collapse even on failure; absent = no override.
+    #[serde(default)]
+    pub expanded: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

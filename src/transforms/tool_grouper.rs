@@ -177,7 +177,7 @@ impl ToolGrouper {
         (container_id, children, child_ids, ops)
     }
 
-    /// Build the Replace op that seals an existing container (collapses it).
+    /// Build the Replace op that seals an existing container.
     fn do_seal(
         &self,
         container_id: &str,
@@ -185,10 +185,11 @@ impl ToolGrouper {
         group_idx: usize,
     ) -> TreeOperation {
         let group = &self.groups[group_idx];
+        let expanded = resolve_container_expanded(group.expanded, children);
         let container_msg = build_container(
             container_id.to_string(),
             children.to_vec(),
-            false,
+            expanded,
             &group.name,
             group.shorten_as_glob,
         );
@@ -568,6 +569,15 @@ impl Transform for ToolGrouper {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Resolve the sealed container's `expanded` (children-visible) state from the group config.
+/// `Some(v)` → use `v` unconditionally; `None` → expand iff any child has an error tag.
+fn resolve_container_expanded(config: Option<bool>, children: &[MessageState]) -> bool {
+    match config {
+        Some(v) => v,
+        None => container_tag(children).as_deref() == Some("error"),
+    }
+}
+
 fn container_tag(children: &[MessageState]) -> Option<String> {
     let tools: Vec<_> = children
         .iter()
@@ -916,7 +926,7 @@ mod tests {
                 name: "Tool calls".to_string(),
                 tools: vec!["*".to_string()],
                 min_count: 3,
-                expanded: false,
+                expanded: Some(false),
                 shorten_as_glob: false,
             }],
             ..Default::default()
@@ -1239,7 +1249,7 @@ mod tests {
                 name: "Tool calls".to_string(),
                 tools: vec!["*".to_string()],
                 min_count: 3,
-                expanded: false,
+                expanded: Some(false),
                 shorten_as_glob: false,
             }],
             ..Default::default()
@@ -1325,7 +1335,7 @@ mod tests {
                 name: "Tool calls".to_string(),
                 tools: vec!["*".to_string()],
                 min_count: 3,
-                expanded: false,
+                expanded: Some(false),
                 shorten_as_glob: false,
             }],
             allow_thinking: false,
@@ -1579,6 +1589,129 @@ mod tests {
             "brace depth exceeds 2: {result}"
         );
         assert_eq!(result, "a/b/{c/{1.rs,2.rs}, d/{e/3.rs,f/4.rs}}");
+    }
+
+    // ── expanded override tests ──────────────────────────────────────────────
+
+    fn make_child_with_tag(id: &str, tag: &str) -> MessageState {
+        MessageState::new(id)
+            .message_type(MessageType::ToolCall)
+            .tag(tag)
+    }
+
+    fn make_child_no_tag(id: &str) -> MessageState {
+        MessageState::new(id).message_type(MessageType::ToolCall)
+    }
+
+    #[test]
+    fn resolve_expanded_some_true_always_expands() {
+        let success_children = vec![make_child_with_tag("t1", "success")];
+        assert!(resolve_container_expanded(Some(true), &success_children));
+    }
+
+    #[test]
+    fn resolve_expanded_some_false_always_collapses() {
+        let error_children = vec![make_child_with_tag("t1", "error")];
+        assert!(!resolve_container_expanded(Some(false), &error_children));
+    }
+
+    #[test]
+    fn resolve_expanded_none_expands_on_error() {
+        let children = vec![make_child_with_tag("t1", "error")];
+        assert!(resolve_container_expanded(None, &children));
+    }
+
+    #[test]
+    fn resolve_expanded_none_collapses_on_success() {
+        let children = vec![make_child_with_tag("t1", "success")];
+        assert!(!resolve_container_expanded(None, &children));
+    }
+
+    #[test]
+    fn resolve_expanded_none_collapses_when_no_tag() {
+        let children = vec![make_child_no_tag("t1")];
+        assert!(!resolve_container_expanded(None, &children));
+    }
+
+    #[test]
+    fn seal_with_expanded_true_leaves_children_visible() {
+        // Group with expanded = true → sealed container must have expanded = true.
+        let mut grouper = ToolGrouper::new(ToolGrouperConfig {
+            groups: vec![crate::config::ToolGroup {
+                name: "Writes".to_string(),
+                tools: vec!["Write".to_string()],
+                min_count: 2,
+                expanded: Some(true),
+                shorten_as_glob: false,
+            }],
+            disable_defaults: true,
+            ..Default::default()
+        });
+        // tool_op uses "Name: args" text; use parenthesis form so extract_tool_name works.
+        let make_write = |id: &'static str| TreeOperation::Append {
+            parent_id: None,
+            message: MessageState::new(id)
+                .message_type(MessageType::ToolCall)
+                .text("Write(src/foo.rs)"),
+        };
+        let _ = grouper.process(vec![make_write("w1"), make_write("w2")]);
+        // Seal with a user message.
+        let ops = grouper.process(vec![user_op("u1")]);
+        // The seal Replace should have expanded = true on the container.
+        let seal = ops
+            .iter()
+            .find(|op| matches!(op, TreeOperation::Replace { .. }))
+            .expect("seal Replace must be present");
+        let TreeOperation::Replace { message, .. } = seal else {
+            unreachable!()
+        };
+        assert!(message.expanded, "sealed container must have expanded=true");
+    }
+
+    #[test]
+    fn seal_with_expanded_none_collapses_on_success() {
+        // Group with expanded = None → success children → sealed container collapsed.
+        let mut grouper = ToolGrouper::new(ToolGrouperConfig {
+            groups: vec![crate::config::ToolGroup {
+                name: "Reads".to_string(),
+                tools: vec!["Read".to_string()],
+                min_count: 2,
+                expanded: None,
+                shorten_as_glob: false,
+            }],
+            disable_defaults: true,
+            ..Default::default()
+        });
+        // Tool calls with success tag.
+        let batch = vec![
+            TreeOperation::Append {
+                parent_id: None,
+                message: MessageState::new("r1")
+                    .message_type(MessageType::ToolCall)
+                    .text("Read(src/a.rs)")
+                    .tag("success"),
+            },
+            TreeOperation::Append {
+                parent_id: None,
+                message: MessageState::new("r2")
+                    .message_type(MessageType::ToolCall)
+                    .text("Read(src/b.rs)")
+                    .tag("success"),
+            },
+        ];
+        let _ = grouper.process(batch);
+        let ops = grouper.process(vec![user_op("u1")]);
+        let seal = ops
+            .iter()
+            .find(|op| matches!(op, TreeOperation::Replace { .. }))
+            .expect("seal Replace must be present");
+        let TreeOperation::Replace { message, .. } = seal else {
+            unreachable!()
+        };
+        assert!(
+            !message.expanded,
+            "sealed container must be collapsed on success"
+        );
     }
 
     #[test]

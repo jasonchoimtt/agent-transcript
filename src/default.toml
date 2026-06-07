@@ -63,14 +63,14 @@ shorten_as_glob = true
 name = "File writes"
 tools = ["Write", "Edit", "MultiEdit", "StrReplace"]
 min_count = 2
-expanded = false
+expanded = true
 shorten_as_glob = true
 
 [[transforms.tool_grouper.default_groups]]
 name = "Shell commands"
 tools = ["Bash", "Shell", "Await"]
 min_count = 2
-expanded = false
+expanded = true
 
 #########################
 # Tool formatter - Cursor
@@ -85,6 +85,7 @@ template = "{{path|path}}"
 providers = ["cursor"]
 tools = ["Write", "StrReplace"]
 template = "{{path|path}}"
+expanded = true
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["cursor"]
@@ -95,6 +96,7 @@ template = "{{path|path}}"
 providers = ["cursor"]
 tools = ["Shell"]
 template = "{{command}}"
+expanded = true
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["cursor"]
@@ -129,11 +131,13 @@ template = "{{file_path|path}}"
 providers = ["claude"]
 tools = ["Write", "Edit"]
 template = "{{file_path|path}}"
+expanded = true
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["claude"]
 tools = ["Bash"]
 template = "{{command}}"
+expanded = true
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["claude"]
