@@ -16,6 +16,8 @@ use crate::theme::Palette;
 use crate::theme::Theme;
 use crate::tree_operation::TreeOperation;
 
+pub use super::search::{PendingSearch, SearchHighlight, SearchState, highlight_text_spans};
+
 // ── HiddenState ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -621,6 +623,10 @@ pub struct TreeScrollViewState {
     pub terminal_render_info: Option<(u16, u16, u16, u16)>,
     pub theme: Theme,
     pub key_parser: KeyParser,
+    /// Committed search (set on Enter).
+    pub search: Option<SearchState>,
+    /// In-progress search (set while typing in SearchInput mode).
+    pub pending_search: Option<PendingSearch>,
     /// UI-flag snapshot taken at `Reset` time; cleared on `ResetDone`.
     /// Incoming nodes (Append/Replace) merge flags from this map before insertion.
     reset_snapshot: HashMap<String, NodeUiFlags>,
@@ -678,6 +684,8 @@ impl TreeScrollViewState {
             terminal_render_info: None,
             theme: Theme::default_dark(),
             key_parser: KeyParser::new(),
+            search: None,
+            pending_search: None,
             reset_snapshot: HashMap::new(),
         };
         state.initialize_selection();
@@ -1125,11 +1133,6 @@ impl TreeScrollViewState {
             }
 
             node_start += h;
-            if node_start >= vp {
-                let overshoot = (node_start + focus_bot as i64 - vp).max(0) as u64;
-                self.advance_top_by(overshoot);
-                return;
-            }
             if !cur.advance(&self.items, nonzero_height) {
                 break;
             }
@@ -2372,6 +2375,8 @@ impl TreeScrollViewState {
             terminal_render_info: None,
             theme: Theme::default_dark(),
             key_parser: KeyParser::new(),
+            search: None,
+            pending_search: None,
             reset_snapshot: HashMap::new(),
         };
         state.initialize_selection();

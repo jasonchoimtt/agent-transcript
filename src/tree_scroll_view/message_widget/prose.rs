@@ -8,7 +8,7 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use crate::theme::{ColorVar, Palette};
 
 use super::super::markdown::{first_line_clipped, render_markdown};
-use super::super::state::MessageState;
+use super::super::state::{MessageState, SearchHighlight, highlight_text_spans};
 use super::brief::{clip_brief, render_brief_line};
 
 pub(super) fn render_prose(
@@ -19,6 +19,7 @@ pub(super) fn render_prose(
     is_markdown: bool,
     skip_lines: u16,
     palette: &Palette,
+    highlight: Option<&SearchHighlight>,
 ) {
     let display_text = node.text.as_deref().unwrap_or("");
     let collapsed_with_children = !node.expanded && !node.children.is_empty();
@@ -66,7 +67,12 @@ pub(super) fn render_prose(
         }
     } else if is_markdown {
         let rendered = render_markdown(display_text, palette);
-        Paragraph::new(rendered)
+        let text: Text<'_> = if let Some(hl) = highlight {
+            highlight_text_spans(rendered, hl.char_index, hl.query_len)
+        } else {
+            rendered
+        };
+        Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((skip_lines, 0))
             .render(text_area, buf);
@@ -75,6 +81,13 @@ pub(super) fn render_prose(
             .into_text()
             .unwrap_or_else(|_| Text::raw(display_text));
         text.style = content_style;
+        let text: Text<'_> = if let Some(hl) = highlight {
+            let mut highlighted = highlight_text_spans(text, hl.char_index, hl.query_len);
+            highlighted.style = content_style;
+            highlighted
+        } else {
+            text
+        };
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((skip_lines, 0))

@@ -38,6 +38,7 @@ dependencies = [
  "pulldown-cmark 0.12.2",
  "ratatui",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

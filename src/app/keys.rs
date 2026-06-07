@@ -6,8 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::clipboard::markdown_to_plain;
 use crate::data_view::{
-    DataViewAction, DataViewState, build_key_shortcuts_nodes, build_reader_log_nodes,
-    handle_key_event_dv,
+    DataViewAction, DataViewState, build_reader_log_nodes, handle_key_event_dv,
 };
 use crate::picker::handler::PickerAction;
 use crate::providers::ProviderKind;
@@ -97,6 +96,8 @@ impl App {
     async fn handle_transcript_screen_key(&mut self, key: KeyEvent, last_area: Rect) {
         if matches!(self.mode, AppMode::Confirm(_)) {
             self.handle_confirm_key(key).await;
+        } else if matches!(self.mode, AppMode::SearchInput { .. }) {
+            self.handle_search_input_key(key).await;
         } else if self.data_view.is_some() {
             self.handle_data_view_key(key, last_area).await;
         } else if self.mode == AppMode::MessageInteraction {
@@ -105,6 +106,58 @@ impl App {
             self.handle_terminal_key(key).await;
         } else {
             self.handle_normal_key(key, last_area).await;
+        }
+    }
+
+    fn active_tree_state_mut(&mut self) -> &mut crate::tree_scroll_view::TreeScrollViewState {
+        if let Some(dv) = &mut self.data_view {
+            &mut dv.tree
+        } else {
+            &mut self.tree_state
+        }
+    }
+
+    async fn handle_search_input_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        let AppMode::SearchInput {
+            ref query,
+            backward,
+        } = self.mode
+        else {
+            return;
+        };
+        let (mut query, backward) = (query.clone(), backward);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.active_tree_state_mut().cancel_search();
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Enter => {
+                self.active_tree_state_mut().commit_search();
+                self.mode = AppMode::Normal;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                self.mode = AppMode::SearchInput {
+                    query: query.clone(),
+                    backward,
+                };
+                self.active_tree_state_mut()
+                    .search_pending(&query, backward);
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                query.push(c);
+                self.mode = AppMode::SearchInput {
+                    query: query.clone(),
+                    backward,
+                };
+                self.active_tree_state_mut()
+                    .search_pending(&query, backward);
+            }
+            _ => {}
         }
     }
 
@@ -335,9 +388,29 @@ impl App {
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('I') {
             // Shift-I: open session info view.
             self.open_session_info();
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('/') {
+            // /: enter forward search.
+            self.mode = AppMode::SearchInput {
+                query: String::new(),
+                backward: false,
+            };
+            self.active_tree_state_mut().search_pending("", false);
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('?') {
-            // ?: open key shortcuts view.
-            self.data_view = Some(DataViewState::from_nodes(build_key_shortcuts_nodes()));
+            // ?: enter backward search.
+            self.mode = AppMode::SearchInput {
+                query: String::new(),
+                backward: true,
+            };
+            self.active_tree_state_mut().search_pending("", true);
+        } else if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('n')
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            // n: next search match.
+            self.active_tree_state_mut().search_next();
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('N') {
+            // N: previous search match (opposite direction).
+            self.active_tree_state_mut().search_prev();
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('!') {
             // !: begin composite key sequence (!l / !L).
             self.pending_app_key = Some('!');

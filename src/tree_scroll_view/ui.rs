@@ -156,6 +156,8 @@ impl StatefulWidget for TreeScrollView<'_> {
 
                     let msg_style = theme.style_for(&node.message_type);
 
+                    let highlight = state.search_highlight_for(&path);
+
                     MessageWidget {
                         node,
                         depth,
@@ -166,6 +168,7 @@ impl StatefulWidget for TreeScrollView<'_> {
                         style: msg_style,
                         palette: &theme.palette,
                         interaction: selected && message_interaction,
+                        highlight,
                     }
                     .render(widget_area, buf);
 

@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
-use super::state::MessageState;
+use super::state::{MessageState, SearchHighlight};
 use crate::theme::styles::{MessageStyle, ToolResultStyle};
 use crate::theme::{ColorVar, Palette};
 use table::{TableUiState, render::render_table};
@@ -35,6 +35,8 @@ pub struct MessageWidget<'a> {
     pub palette: &'a Palette,
     /// True when this node is the active target of message-interaction mode.
     pub interaction: bool,
+    /// Non-None when this node contains the current search match.
+    pub highlight: Option<SearchHighlight>,
 }
 
 impl MessageWidget<'_> {
@@ -204,6 +206,7 @@ impl Widget for MessageWidget<'_> {
                     is_markdown,
                     self.skip_lines,
                     self.palette,
+                    self.highlight.as_ref(),
                 );
             }
         }

@@ -5,6 +5,7 @@ pub mod markdown;
 pub mod message_widget;
 pub mod predicates;
 pub mod sample;
+pub mod search;
 pub mod state;
 #[cfg(test)]
 mod tests;

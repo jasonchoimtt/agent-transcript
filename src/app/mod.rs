@@ -72,6 +72,8 @@ pub enum AppMode {
     MessageInteraction,
     /// An in-status-bar confirmation prompt is waiting for y/n.
     Confirm(ConfirmKind),
+    /// A search query is being typed in the status bar.
+    SearchInput { query: String, backward: bool },
 }
 
 pub struct App {

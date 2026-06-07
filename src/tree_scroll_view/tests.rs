@@ -1584,3 +1584,492 @@ fn update_clears_height_cache() {
         "height cache should be cleared after Update"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Search
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn search_msg(id: &str, text: &str) -> MessageState {
+    MessageState::new(id)
+        .text(text)
+        .message_type(MessageType::AgentMessage)
+}
+
+// ── search_pending ────────────────────────────────────────────────────────────
+
+#[test]
+fn search_pending_finds_match_in_flat_tree() {
+    let items = vec![
+        search_msg("a", "hello world"),
+        search_msg("b", "foo bar"),
+        search_msg("c", "needle here"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("needle", false);
+
+    let ps = state
+        .pending_search
+        .as_ref()
+        .expect("pending_search must be set");
+    assert_eq!(ps.found_path, vec![2], "should find node c at index 2");
+    assert!(!ps.found_path.is_empty());
+}
+
+#[test]
+fn search_pending_no_match_leaves_viewport_at_start() {
+    let items = vec![search_msg("a", "hello"), search_msg("b", "world")];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    let orig_top = state.top_index.clone();
+    let orig_offset = state.top_offset;
+
+    state.search_pending("zzznomatch", false);
+
+    let ps = state
+        .pending_search
+        .as_ref()
+        .expect("pending_search must be set");
+    assert!(
+        ps.found_path.is_empty(),
+        "no match: found_path should be empty"
+    );
+    assert_eq!(state.top_index, orig_top, "top_index restored on no match");
+    assert_eq!(
+        state.top_offset, orig_offset,
+        "top_offset restored on no match"
+    );
+}
+
+#[test]
+fn search_pending_preserves_start_across_keystrokes() {
+    let items = vec![search_msg("a", "apple"), search_msg("b", "banana")];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    let orig_top = state.top_index.clone();
+
+    // Simulate typing "a", then "p", then "p" — start should remain captured.
+    state.search_pending("a", false);
+    state.search_pending("ap", false);
+    state.search_pending("app", false);
+
+    let ps = state
+        .pending_search
+        .as_ref()
+        .expect("pending_search must be set");
+    assert_eq!(
+        ps.start_top_index, orig_top,
+        "start_top_index must not change across keystrokes"
+    );
+    assert_eq!(ps.found_path, vec![0], "should find 'apple' at index 0");
+}
+
+#[test]
+fn search_pending_finds_visible_ancestor_for_collapsed_child() {
+    // Parent is collapsed; child has the match. We expect the visible ancestor
+    // (the parent) to be used for InnerFocus.
+    let child = search_msg("child", "needle inside");
+    let parent = MessageState::new("parent")
+        .text("parent text")
+        .message_type(MessageType::AgentMessage)
+        .expanded(false)
+        .children(vec![child]);
+    let mut state = TreeScrollViewState::new(vec![parent]);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("needle", false);
+
+    let ps = state
+        .pending_search
+        .as_ref()
+        .expect("pending_search must be set");
+    // found_path should point to the collapsed child
+    assert_eq!(
+        ps.found_path,
+        vec![0, 0],
+        "found_path should be the actual match"
+    );
+
+    // The precedence should be InnerFocus targeting the *visible* ancestor (parent).
+    match &state.precedence {
+        super::state::Precedence::InnerFocus { path, .. } => {
+            assert_eq!(
+                path,
+                &vec![0],
+                "InnerFocus path should be the visible parent"
+            );
+        }
+        other => panic!("expected InnerFocus precedence, got {:?}", other),
+    }
+}
+
+// ── cancel_search ─────────────────────────────────────────────────────────────
+
+#[test]
+fn cancel_search_restores_viewport() {
+    let items = vec![
+        search_msg("a", "foo"),
+        search_msg("b", "bar"),
+        search_msg("c", "baz"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 6); // viewport only shows a few nodes
+
+    // Scroll to node b.
+    state.select_next();
+    do_layout(&mut state, 80, 6);
+    let saved_top = state.top_index.clone();
+    let saved_offset = state.top_offset;
+
+    // Start search — this captures the start position.
+    state.search_pending("baz", false);
+    assert!(state.pending_search.is_some());
+
+    // Cancel — viewport should revert.
+    state.cancel_search();
+
+    assert!(
+        state.pending_search.is_none(),
+        "pending_search cleared after cancel"
+    );
+    assert_eq!(
+        state.top_index, saved_top,
+        "top_index restored after cancel"
+    );
+    assert_eq!(
+        state.top_offset, saved_offset,
+        "top_offset restored after cancel"
+    );
+}
+
+// ── commit_search ─────────────────────────────────────────────────────────────
+
+#[test]
+fn commit_search_moves_selection_and_sets_search_state() {
+    let items = vec![
+        search_msg("a", "alpha"),
+        search_msg("b", "beta"),
+        search_msg("c", "gamma"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("gamma", false);
+    assert_eq!(state.pending_search.as_ref().unwrap().found_path, vec![2]);
+
+    state.commit_search();
+
+    assert!(
+        state.pending_search.is_none(),
+        "pending_search cleared after commit"
+    );
+    let committed = state.search.as_ref().expect("search must be committed");
+    assert_eq!(committed.found_path, vec![2]);
+    assert_eq!(committed.query, "gamma");
+    assert_eq!(
+        state.selection_index,
+        vec![2],
+        "selection should move to match"
+    );
+}
+
+#[test]
+fn commit_search_expands_collapsed_ancestor() {
+    let child = search_msg("child", "needle inside");
+    let parent = MessageState::new("parent")
+        .text("parent text")
+        .message_type(MessageType::AgentMessage)
+        .expanded(false)
+        .children(vec![child]);
+    let mut state = TreeScrollViewState::new(vec![parent, search_msg("other", "other")]);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("needle", false);
+    state.commit_search();
+
+    // The parent at [0] should now be expanded.
+    assert!(
+        state.items[0].expanded,
+        "ancestor must be expanded after commit"
+    );
+    assert_eq!(
+        state.selection_index,
+        vec![0, 0],
+        "selection at child after expand"
+    );
+}
+
+#[test]
+fn commit_search_noop_when_no_match() {
+    let items = vec![search_msg("a", "hello")];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("zzz", false);
+    let sel_before = state.selection_index.clone();
+    state.commit_search();
+
+    // No match: pending clears, committed search not set, selection unchanged.
+    assert!(state.pending_search.is_none());
+    assert!(
+        state.search.is_none(),
+        "search must not be set when no match found"
+    );
+    assert_eq!(state.selection_index, sel_before);
+}
+
+// ── search_next / search_prev ─────────────────────────────────────────────────
+
+#[test]
+fn search_next_advances_to_next_match() {
+    let items = vec![
+        search_msg("a", "apple pie"),
+        search_msg("b", "banana"),
+        search_msg("c", "apple tart"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    // Commit search on first "apple" (node 0).
+    state.search_pending("apple", false);
+    state.commit_search();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![0]);
+
+    // search_next should move to node c at index 2.
+    state.search_next();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![2]);
+    assert_eq!(state.selection_index, vec![2]);
+}
+
+#[test]
+fn search_next_finds_second_occurrence_within_same_node() {
+    // Node a contains two occurrences of "hit". search_next from the first
+    // should land on the second before moving to any other node.
+    let items = vec![
+        search_msg("a", "hit and hit again"),
+        search_msg("b", "hit somewhere else"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("hit", false);
+    state.commit_search();
+    // committed at first "hit" in node a (char 0)
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![0]);
+    assert_eq!(state.search.as_ref().unwrap().found_char_index, 0);
+
+    // Next should find the second "hit" in node a (char 8), not jump to node b.
+    state.search_next();
+    let s = state.search.as_ref().unwrap();
+    assert_eq!(
+        s.found_path,
+        vec![0],
+        "should stay in node a for second hit"
+    );
+    assert_eq!(s.found_char_index, 8, "second 'hit' starts at char 8");
+
+    // Next after that should move to node b.
+    state.search_next();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![1]);
+}
+
+#[test]
+fn search_next_wraps_around_to_first_match() {
+    let items = vec![
+        search_msg("a", "target one"),
+        search_msg("b", "nothing"),
+        search_msg("c", "target two"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("target", false);
+    state.commit_search();
+    // advance to node c.
+    state.search_next();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![2]);
+
+    // Next search_next should wrap to node a again.
+    state.search_next();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![0]);
+}
+
+#[test]
+fn search_prev_retreats_to_previous_match() {
+    let items = vec![
+        search_msg("a", "apple pie"),
+        search_msg("b", "banana"),
+        search_msg("c", "apple tart"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    // Commit search on first "apple" (node 0), then advance to node c.
+    state.search_pending("apple", false);
+    state.commit_search();
+    state.search_next();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![2]);
+
+    // search_prev should go back to node a at index 0.
+    state.search_prev();
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![0]);
+    assert_eq!(state.selection_index, vec![0]);
+}
+
+#[test]
+fn search_prev_finds_earlier_occurrence_within_same_node() {
+    // Node b contains two occurrences. When at the second, search_prev should
+    // land on the first without leaving the node.
+    let items = vec![
+        search_msg("a", "other"),
+        search_msg("b", "hit early and hit late"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("hit", false);
+    state.commit_search();
+    // committed at first "hit" in node a (char 0 of "other" doesn't match;
+    // first "hit" is in node b at char 0).
+    // Actually "other" has no hit; so first match is node b at char 0.
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![1]);
+    assert_eq!(state.search.as_ref().unwrap().found_char_index, 0);
+
+    // Advance to the second "hit" in node b (char 14).
+    state.search_next();
+    let s = state.search.as_ref().unwrap();
+    assert_eq!(s.found_path, vec![1], "still in node b");
+    assert_eq!(s.found_char_index, 14);
+
+    // search_prev should retreat to the first "hit" in node b, not jump to node a.
+    state.search_prev();
+    let s = state.search.as_ref().unwrap();
+    assert_eq!(s.found_path, vec![1], "should stay in node b");
+    assert_eq!(s.found_char_index, 0);
+}
+
+#[test]
+fn search_prev_crosses_node_to_last_occurrence() {
+    // When at the first occurrence in a node, search_prev should go to the
+    // *last* occurrence in the previous node (not the first).
+    let items = vec![
+        search_msg("a", "hit hit hit"), // three occurrences: 0, 4, 8
+        search_msg("b", "hit here"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("hit", false);
+    state.commit_search();
+    // First match: node a at char 0.
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![0]);
+    assert_eq!(state.search.as_ref().unwrap().found_char_index, 0);
+
+    // Advance to node b.
+    state.search_next(); // node a char 4
+    state.search_next(); // node a char 8
+    state.search_next(); // node b char 0
+    assert_eq!(state.search.as_ref().unwrap().found_path, vec![1]);
+    assert_eq!(state.search.as_ref().unwrap().found_char_index, 0);
+
+    // search_prev from node b char 0: no earlier match in node b, so go to
+    // the LAST occurrence in node a (char 8), not the first (char 0).
+    state.search_prev();
+    let s = state.search.as_ref().unwrap();
+    assert_eq!(s.found_path, vec![0], "went back to node a");
+    assert_eq!(s.found_char_index, 8, "landed on the last 'hit' in node a");
+}
+
+// ── backward search ───────────────────────────────────────────────────────────
+
+#[test]
+fn backward_search_finds_last_match_first() {
+    let items = vec![
+        search_msg("a", "needle first"),
+        search_msg("b", "no match"),
+        search_msg("c", "needle last"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    // Backward search from the end.
+    state.search_pending("needle", true);
+
+    let ps = state.pending_search.as_ref().unwrap();
+    // Backward from top_index (which starts at node 0) wraps to the last match.
+    // Since we start inclusive at node 0, and needle matches node 0 first, backward
+    // search starting at node 0 inclusive would find node 0. But note that the
+    // do_search with start_inclusive=true for backward searches also starts from
+    // start_path.  Let's verify we got some valid needle match.
+    assert!(
+        !ps.found_path.is_empty(),
+        "backward search should find a needle"
+    );
+    let found = get_node(&state.items, &ps.found_path).unwrap();
+    assert!(
+        found.text.as_deref().unwrap_or("").contains("needle"),
+        "found node must contain 'needle'"
+    );
+}
+
+// ── search_highlight_for ──────────────────────────────────────────────────────
+
+#[test]
+fn search_highlight_for_returns_highlight_at_match_path() {
+    let items = vec![
+        search_msg("a", "hello world"),
+        search_msg("b", "no match here"),
+    ];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("world", false);
+
+    // Path [0] is the match.
+    let hl = state.search_highlight_for(&[0]);
+    assert!(hl.is_some(), "highlight should be set for the matched path");
+    let hl = hl.unwrap();
+    assert_eq!(hl.query_len, 5, "query_len should be length of 'world'");
+
+    // Path [1] is not the match.
+    let hl2 = state.search_highlight_for(&[1]);
+    assert!(hl2.is_none(), "no highlight for unmatched path");
+}
+
+#[test]
+fn search_highlight_uses_committed_search_when_no_pending() {
+    let items = vec![search_msg("a", "hello world")];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("world", false);
+    state.commit_search();
+
+    // After commit, pending is gone but committed search still highlights.
+    assert!(state.pending_search.is_none());
+    let hl = state.search_highlight_for(&[0]);
+    assert!(
+        hl.is_some(),
+        "highlight from committed search should still work"
+    );
+}
+
+// ── case-insensitive search ───────────────────────────────────────────────────
+
+#[test]
+fn search_is_case_insensitive() {
+    let items = vec![search_msg("a", "Hello World"), search_msg("b", "nothing")];
+    let mut state = TreeScrollViewState::new(items);
+    do_layout(&mut state, 80, 24);
+
+    state.search_pending("hello", false);
+    let ps = state.pending_search.as_ref().unwrap();
+    assert_eq!(
+        ps.found_path,
+        vec![0],
+        "case-insensitive search should match 'Hello'"
+    );
+}

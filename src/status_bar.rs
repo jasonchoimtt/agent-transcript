@@ -47,6 +47,39 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
+        // Search input overrides the entire bar.
+        if let AppMode::SearchInput { query, backward } = self.mode {
+            let prefix = if *backward { "?" } else { "/" };
+            let no_match = self
+                .tree_state
+                .pending_search
+                .as_ref()
+                .is_some_and(|ps| ps.found_path.is_empty() && !ps.query.is_empty());
+            let left_text = format!(" {prefix}{query}▌");
+            let right_text = if no_match { " no match " } else { "" };
+            let search_style = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 80));
+            let warn_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+            if right_text.is_empty() {
+                Paragraph::new(left_text)
+                    .style(search_style)
+                    .render(area, buf);
+            } else {
+                let right_w = (right_text.len() as u16).min(area.width);
+                let left_w = area.width.saturating_sub(right_w);
+                let chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(left_w), Constraint::Length(right_w)])
+                    .split(area);
+                Paragraph::new(left_text)
+                    .style(search_style)
+                    .render(chunks[0], buf);
+                Paragraph::new(right_text)
+                    .style(warn_style)
+                    .render(chunks[1], buf);
+            }
+            return;
+        }
+
         // Confirmation prompts override hints.
         let confirm_style = Style::default().fg(Color::White).bg(self.primary);
         if let AppMode::Confirm(prompt) = self.mode {
@@ -118,7 +151,10 @@ impl StatusBar<'_> {
         Vec<(&'static str, &'static str)>,
         Option<Vec<(&'static str, &'static str)>>,
     ) {
-        if self.data_view_open || self.mode == &AppMode::MessageInteraction {
+        if self.data_view_open
+            || self.mode == &AppMode::MessageInteraction
+            || matches!(self.mode, AppMode::SearchInput { .. })
+        {
             // (c) data view or interaction mode: only escape available
             (vec![("Esc", "Back")], None)
         } else if self.mode == &AppMode::Terminal {

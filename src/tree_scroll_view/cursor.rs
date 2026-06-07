@@ -377,6 +377,110 @@ impl TreeCursor {
         self.descend_to_last_with(root, |n| !n.hidden.is_hidden())
     }
 
+    /// Step to the next non-hidden node in DFS order, descending into children
+    /// regardless of `expanded` state. Returns `false` at end.
+    pub fn advance_search(&mut self, root: &[MessageState]) -> bool {
+        let include = |n: &MessageState| !n.hidden.is_hidden();
+        // 1. Descend into first non-hidden child (expanded or not).
+        {
+            let node = get_node(root, &self.path).unwrap();
+            if let Some(ci) = node.children.iter().position(include) {
+                if node.indent_children {
+                    self.visual_depth += 1;
+                }
+                self.path.push(ci);
+                return true;
+            }
+        }
+        // 2. Backtrack until we find a next non-hidden sibling.
+        loop {
+            let i = match self.path.pop() {
+                Some(i) => i,
+                None => return false,
+            };
+            let siblings: &[MessageState] = if self.path.is_empty() {
+                root
+            } else {
+                &get_node(root, &self.path).unwrap().children
+            };
+            if let Some(offset) = siblings[i + 1..].iter().position(include) {
+                self.path.push(i + 1 + offset);
+                return true;
+            }
+            if !self.path.is_empty()
+                && get_node(root, &self.path)
+                    .map(|n| n.indent_children)
+                    .unwrap_or(false)
+            {
+                self.visual_depth = self.visual_depth.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Step to the previous non-hidden node in DFS order, descending into children
+    /// regardless of `expanded` state. Returns `false` at start.
+    pub fn retreat_search(&mut self, root: &[MessageState]) -> bool {
+        let include = |n: &MessageState| !n.hidden.is_hidden();
+        let i = match self.path.last() {
+            Some(&i) => i,
+            None => return false,
+        };
+        let siblings: &[MessageState] = if self.path.len() == 1 {
+            root
+        } else {
+            &get_node(root, &self.path[..self.path.len() - 1])
+                .unwrap()
+                .children
+        };
+        if let Some(prev_i) = siblings[..i].iter().rposition(include) {
+            *self.path.last_mut().unwrap() = prev_i;
+            self.descend_to_last_search(root);
+            return true;
+        }
+        if self.path.len() == 1 {
+            return false;
+        }
+        let parent_len = self.path.len() - 1;
+        if get_node(root, &self.path[..parent_len])
+            .map(|n| n.indent_children)
+            .unwrap_or(false)
+        {
+            self.visual_depth = self.visual_depth.saturating_sub(1);
+        }
+        self.path.pop();
+        true
+    }
+
+    /// Descend to the deepest last non-hidden descendant, regardless of `expanded`.
+    fn descend_to_last_search(&mut self, root: &[MessageState]) {
+        loop {
+            let node = get_node(root, &self.path).unwrap();
+            if node.children.is_empty() {
+                return;
+            }
+            match node.children.iter().rposition(|n| !n.hidden.is_hidden()) {
+                Some(last_i) => {
+                    if node.indent_children {
+                        self.visual_depth += 1;
+                    }
+                    self.path.push(last_i);
+                }
+                None => return,
+            }
+        }
+    }
+
+    /// Point at the last non-hidden node in the entire tree (including collapsed subtrees).
+    pub fn search_last(root: &[MessageState]) -> Option<Self> {
+        let i = root.iter().rposition(|n| !n.hidden.is_hidden())?;
+        let mut cur = Self {
+            path: vec![i],
+            visual_depth: 0,
+        };
+        cur.descend_to_last_search(root);
+        Some(cur)
+    }
+
     /// Count `Hidden`-state nodes in DFS order between the current position and
     /// the next non-hidden node. Used to render the braille indicator in the padding row.
     pub fn count_hidden_to_next(&self, root: &[MessageState]) -> usize {
