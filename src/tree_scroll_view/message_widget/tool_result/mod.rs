@@ -3,7 +3,7 @@ pub mod render;
 
 use crossterm::event::KeyEvent;
 
-use super::state::{ComponentKeyResult, MessageComponent, MessageState, UiState};
+use super::super::state::{ComponentKeyResult, MessageComponent, MessageState, UiState};
 use crate::theme::Palette;
 
 // ── Data types ────────────────────────────────────────────────────────────────

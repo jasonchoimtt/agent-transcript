@@ -1,7 +1,9 @@
 mod brief;
 mod json;
 mod prose;
+pub mod table;
 mod tool_call;
+pub mod tool_result;
 
 use ansi_to_tui::IntoText;
 use ratatui::buffer::Buffer;
@@ -10,13 +12,13 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use super::state::MessageState;
-use super::table::{TableUiState, render::render_table};
-use super::tool_result::{
+use crate::theme::styles::{MessageStyle, ToolResultStyle};
+use crate::theme::{ColorVar, Palette};
+use table::{TableUiState, render::render_table};
+use tool_result::{
     ToolResultUiState,
     render::{render_compact, render_tool_result},
 };
-use crate::theme::styles::{MessageStyle, ToolResultStyle};
-use crate::theme::{ColorVar, Palette};
 
 pub struct MessageWidget<'a> {
     pub node: &'a MessageState,

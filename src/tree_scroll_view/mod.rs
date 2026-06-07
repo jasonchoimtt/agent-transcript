@@ -6,10 +6,10 @@ pub mod message_widget;
 pub mod predicates;
 pub mod sample;
 pub mod state;
-pub mod table;
 #[cfg(test)]
 mod tests;
-pub mod tool_result;
+pub use message_widget::table;
+pub use message_widget::tool_result;
 pub mod ui;
 
 pub use cursor::TreeCursor;

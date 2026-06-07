@@ -4,7 +4,7 @@ use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
-use super::super::markdown::render_markdown;
+use super::super::super::markdown::render_markdown;
 use super::{CELL_PADDING, TableUiState, row_render_height};
 use crate::theme::Palette;
 use crate::theme::styles::TableStyle;

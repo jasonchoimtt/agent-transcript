@@ -3,8 +3,8 @@ pub mod render;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::markdown::render_markdown;
-use super::state::{
+use super::super::markdown::render_markdown;
+use super::super::state::{
     ComponentKeyResult, MessageComponent, MessageState, UiState, measure_text_height,
 };
 use crate::clipboard::markdown_to_plain;
