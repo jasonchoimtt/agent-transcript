@@ -41,6 +41,9 @@ pub struct MessagePath {
     /// Byte offsets of all messages known to be on the active path during the
     /// backward pass.
     pub initial_active_offsets: HashSet<usize>,
+
+    /// Whether a root node has been emitted during the forward pass
+    pub root_emitted: bool,
 }
 
 pub struct MessageNode<'a> {
@@ -65,6 +68,7 @@ impl MessagePath {
             active_tail: None,
             initial_offset: None,
             initial_active_offsets: HashSet::new(),
+            root_emitted: false,
         }
     }
 
@@ -74,16 +78,16 @@ impl MessagePath {
         }
 
         if self.active_path.contains(node.uuid) {
+            self.initial_active_offsets.insert(node.byte_offset);
             if let Some(p) = node.parent_uuid {
                 self.active_path.insert(p.to_string());
-                self.initial_active_offsets.insert(node.byte_offset);
             }
         } else if self.active_tail.is_none() && !node.is_tool_result {
             self.active_tail = Some(node.uuid.to_string());
             self.active_path.insert(node.uuid.to_string());
+            self.initial_active_offsets.insert(node.byte_offset);
             if let Some(p) = node.parent_uuid {
                 self.active_path.insert(p.to_string());
-                self.initial_active_offsets.insert(node.byte_offset);
             }
         }
     }
@@ -128,10 +132,18 @@ impl MessagePath {
                 }
             }
             _ => {
-                if self.active_path.is_empty() {
-                    self.active_path.insert(node.uuid.to_string());
-                    self.active_tail = Some(node.uuid.to_string());
-                    ForwardPathResult::Ingest
+                if !self.root_emitted {
+                    if self.active_path.is_empty() {
+                        self.active_path.insert(node.uuid.to_string());
+                        self.active_tail = Some(node.uuid.to_string());
+                        self.root_emitted = true;
+                        ForwardPathResult::Ingest
+                    } else if self.initial_active_offsets.contains(&node.byte_offset) {
+                        self.root_emitted = true;
+                        ForwardPathResult::Ingest
+                    } else {
+                        ForwardPathResult::Drop
+                    }
                 } else {
                     warn!(
                         node.uuid,
@@ -251,10 +263,9 @@ mod tests {
         assert!(path.active_path.contains("msg1"));
         assert!(path.active_path.contains("msg2"));
 
-        // root is dropped: no parent, but active_path is already populated by the backward pass
         assert!(
-            matches!(results[0], ForwardPathResult::Drop),
-            "root should be dropped"
+            matches!(results[0], ForwardPathResult::Ingest),
+            "root should be ingested"
         );
         assert!(
             matches!(results[1], ForwardPathResult::Ingest),
@@ -288,8 +299,8 @@ mod tests {
         assert!(!path.active_path.contains("branch1"));
 
         assert!(
-            matches!(results[0], ForwardPathResult::Drop),
-            "root dropped (active_path non-empty)"
+            matches!(results[0], ForwardPathResult::Ingest),
+            "root must be ingested"
         );
         assert!(
             matches!(results[1], ForwardPathResult::Drop),
@@ -353,8 +364,8 @@ mod tests {
         assert_eq!(path.active_tail.as_deref(), Some("asst-final"));
 
         assert!(
-            matches!(results[0], ForwardPathResult::Drop),
-            "root dropped"
+            matches!(results[0], ForwardPathResult::Ingest),
+            "root ingested"
         );
         assert!(
             matches!(results[1], ForwardPathResult::Ingest),
