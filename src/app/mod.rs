@@ -306,16 +306,36 @@ impl App {
                 Event::Crossterm(crossterm::event::Event::Mouse(ev)) => {
                     use crossterm::event::MouseEventKind;
                     match ev.kind {
-                        MouseEventKind::ScrollUp => {
-                            if self.mode == AppMode::Terminal {
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            if ev.kind == MouseEventKind::ScrollUp && self.mode == AppMode::Terminal
+                            {
                                 self.mode = AppMode::Normal;
                                 let _ = std::io::stdout().write_all(b"\x1b[0 q");
                                 let _ = std::io::stdout().flush();
                             }
-                            self.tree_state.scroll_up(3);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.tree_state.scroll_down(3);
+                            let mut count = 1;
+
+                            // Try to batch consecutive scroll events
+                            while let Some(event2) = self.events.try_recv() {
+                                match event2 {
+                                    Event::Crossterm(crossterm::event::Event::Mouse(ev2))
+                                        if ev2.kind == ev.kind =>
+                                    {
+                                        count += 1
+                                    }
+                                    other => {
+                                        self.events.unget(other);
+                                        break;
+                                    }
+                                }
+                            }
+                            match ev.kind {
+                                MouseEventKind::ScrollUp => self.tree_state.scroll_up(count * 3),
+                                MouseEventKind::ScrollDown => {
+                                    self.tree_state.scroll_down(count * 3)
+                                }
+                                _ => unreachable!(),
+                            }
                         }
                         _ => {
                             if self.mode == AppMode::Terminal {
