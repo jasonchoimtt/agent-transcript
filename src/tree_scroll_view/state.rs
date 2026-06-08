@@ -337,15 +337,6 @@ fn collect_hidden_run_backward(
     paths
 }
 
-fn notify_viewport_width_changed(items: &mut [MessageState]) {
-    for item in items.iter_mut() {
-        if let Some(mut component) = get_message_component(item) {
-            component.on_viewport_width_changed();
-        }
-        notify_viewport_width_changed(&mut item.children);
-    }
-}
-
 fn register_subtree(map: &mut HashMap<String, Vec<usize>>, base: &[usize], node: &MessageState) {
     map.insert(node.id.clone(), base.to_vec());
     for (i, child) in node.children.iter().enumerate() {
@@ -882,13 +873,19 @@ impl TreeScrollViewState {
     // ── sizing ────────────────────────────────────────────────────────────────
 
     pub fn size_node(&mut self, path: &[usize], depth: usize) -> u16 {
-        if let Some(h) = get_node(&self.items, path).and_then(|n| n.height) {
+        let Some(node) = get_node_mut(&mut self.items, path) else {
+            return 0;
+        };
+
+        if let Some(h) = node.height {
             return h;
         }
-        let is_terminal = get_node(&self.items, path)
-            .map(|n| n.is_terminal)
-            .unwrap_or(false);
-        let h = if is_terminal {
+
+        if let Some(ref mut comp) = get_message_component(node) {
+            comp.on_viewport_width_changed();
+        }
+
+        let h = if node.is_terminal {
             let content = if self.terminal_expanded {
                 self.terminal_scrollback_available + self.terminal_pty_rows
             } else {
@@ -897,23 +894,12 @@ impl TreeScrollViewState {
             };
             content + 1 // +1 bottom padding
         } else {
-            let (is_group, is_expanded, display_text, show_more, msg_type, xml_tag) = {
-                let n = get_node(&self.items, path).unwrap();
-                (
-                    n.group,
-                    n.expanded,
-                    n.text.as_deref().unwrap_or("").to_string(),
-                    n.show_more,
-                    n.message_type.clone(),
-                    n.tag.clone(),
-                )
-            };
             // Expanded groups are zero-height: invisible structural containers.
-            if is_group && is_expanded {
-                get_node_mut(&mut self.items, path).unwrap().height = Some(0);
+            if node.group && node.expanded {
+                node.height = Some(0);
                 return 0;
             }
-            if !show_more {
+            if !node.show_more {
                 2 // 1 content line + 1 bottom padding
             } else {
                 let prefix_len = (depth * 2 + 2) as u16;
@@ -925,20 +911,20 @@ impl TreeScrollViewState {
                 // Give the component a chance to own layout (e.g. table col-width init).
                 // Disjoint field borrows: palette borrows self.theme, items borrows self.items.
                 let palette = &self.theme.palette;
-                let layout_h = get_node_mut(&mut self.items, path)
-                    .and_then(|n| get_message_component(n))
-                    .and_then(|mut c| c.layout_pass(available, palette));
+                let layout_h =
+                    get_message_component(node).and_then(|mut c| c.layout_pass(available, palette));
 
                 if let Some(h) = layout_h {
-                    get_node_mut(&mut self.items, path).unwrap().height = Some(h);
+                    node.height = Some(h);
                     return h;
                 }
 
                 // Text-height fallback for nodes without a component.
+                let display_text = node.text.as_deref().unwrap_or("").to_string();
                 let h = if self
                     .theme
-                    .style_for(&msg_type)
-                    .uses_markdown(xml_tag.as_deref())
+                    .style_for(&node.message_type)
+                    .uses_markdown(node.tag.as_deref())
                 {
                     let text = render_markdown(&display_text, &self.theme.palette);
                     measure_text_height(&text, available)
@@ -949,7 +935,7 @@ impl TreeScrollViewState {
                 h.max(1) + 1
             }
         };
-        get_node_mut(&mut self.items, path).unwrap().height = Some(h);
+        node.height = Some(h);
         h
     }
 
@@ -1181,7 +1167,6 @@ impl TreeScrollViewState {
         if self.viewport_width != width {
             self.viewport_width = width;
             clear_heights(&mut self.items);
-            notify_viewport_width_changed(&mut self.items);
         }
         self.viewport_height = height;
     }
