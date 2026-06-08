@@ -49,6 +49,7 @@ pub enum TreeAction {
     RevealJumpBackward,
     // global hidden toggle
     ToggleAllHidden,
+    ToggleShowMore,
     // marks and jump list
     SetMark(char),
     DeleteMark(char),

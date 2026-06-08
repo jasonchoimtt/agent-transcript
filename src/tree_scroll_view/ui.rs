@@ -5,11 +5,12 @@ use ratatui::widgets::{StatefulWidget, Widget};
 use super::cursor::TreeCursor;
 use super::message_widget::MessageWidget;
 use super::predicates::nonzero_height;
-use super::state::{Precedence, TreeScrollViewState, get_node, get_node_mut};
+use super::state::{MessageRenderInfo, Precedence, TreeScrollViewState, get_node, get_node_mut};
 use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
 use crate::terminal::placeholder::PlaceholderWidget;
 use crate::terminal::ui::TerminalWidget;
 use crate::theme::Theme;
+use crate::tree_scroll_view::message_widget::component::HoverTarget;
 
 pub fn hidden_indicator_char(count: usize) -> &'static str {
     match count {
@@ -80,6 +81,7 @@ impl StatefulWidget for TreeScrollView<'_> {
             .unwrap_or(false);
 
         state.terminal_render_info = None;
+        state.render_rects.clear();
         let mut y = area.top();
         let mut first = true;
 
@@ -161,6 +163,30 @@ impl StatefulWidget for TreeScrollView<'_> {
                     // all the way to the end of the node (not clipped at the bottom).
                     let last_row_is_pad = skip + visible_rows == h;
 
+                    let hidden_count = if last_row_is_pad {
+                        cur.count_hidden_to_next(&state.items)
+                    } else {
+                        0
+                    };
+
+                    // Record render info for hit-testing.
+                    state.render_rects.push(MessageRenderInfo {
+                        path: path.clone(),
+                        widget_area,
+                        has_gap_row: last_row_is_pad,
+                        hidden_after: hidden_count,
+                        skip_lines: skip,
+                        visual_depth: depth,
+                    });
+
+                    // Derive hover state for this node.
+                    let hovered = state.hover.as_ref().is_some_and(|h| h.path == path);
+                    let hover_target: Option<&HoverTarget> = if hovered {
+                        state.hover.as_ref().map(|h| &h.target)
+                    } else {
+                        None
+                    };
+
                     let node = get_node_mut(&mut state.items, &path).unwrap();
                     let mark = state.marks.mark_for_id(&node.id);
 
@@ -176,18 +202,37 @@ impl StatefulWidget for TreeScrollView<'_> {
                         interaction: selected && message_interaction,
                         highlight,
                         mark,
+                        hovered,
+                        hover_target,
                     }
                     .render(widget_area, buf);
 
                     // Braille indicator in the padding row when hidden nodes follow.
                     if last_row_is_pad {
-                        let hidden_count = cur.count_hidden_to_next(&state.items);
                         let indicator = hidden_indicator_char(hidden_count);
                         if !indicator.is_empty() {
                             let pad_y = widget_area.y + visible_rows - 1;
                             if let Some(cell) = buf.cell_mut((area.x + 1, pad_y)) {
                                 let muted = theme.palette.muted;
                                 cell.set_symbol(indicator).set_fg(muted);
+                            }
+                        }
+
+                        // Gap row hover text: show "(N hidden)" when hovering.
+                        if hidden_count > 0
+                            && hovered
+                            && matches!(hover_target, Some(HoverTarget::GapRow { .. }))
+                        {
+                            let pad_y = widget_area.y + visible_rows - 1;
+                            let hint = format!("({} hidden)", hidden_count);
+                            let muted = theme.palette.muted;
+                            for (hx, ch) in (area.x + 2..).zip(hint.chars()) {
+                                if hx >= area.x + area.width {
+                                    break;
+                                }
+                                if let Some(cell) = buf.cell_mut((hx, pad_y)) {
+                                    cell.set_symbol(&ch.to_string()).set_fg(muted);
+                                }
                             }
                         }
                     }

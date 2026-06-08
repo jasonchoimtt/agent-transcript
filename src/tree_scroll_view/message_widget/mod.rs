@@ -13,7 +13,9 @@ use ratatui::widgets::Widget;
 use super::state::{MessageState, MessageType, SearchHighlight};
 use crate::theme::styles::MessageStyle;
 use crate::theme::{ColorVar, Palette};
-use crate::tree_scroll_view::message_widget::component::{ContentRenderContext, MessageComponent};
+use crate::tree_scroll_view::message_widget::component::{
+    ContentRenderContext, HoverTarget, MessageComponent,
+};
 use table::{TableComponent, TableState};
 use tool_result::{ToolResultComponent, ToolResultState};
 
@@ -51,6 +53,12 @@ pub fn get_message_component<'a>(
     }
 }
 
+/// Returns the inner-component mouse hit for a node at `(rel_x, rel_y)` in table-space
+/// (rel_x from content_x, rel_y from table top including skip_lines offset).
+pub fn match_mouse_node(node: &mut MessageState, rel_x: u16, rel_y: u16) -> Option<Vec<usize>> {
+    get_message_component(node)?.match_mouse(rel_x, rel_y)
+}
+
 pub struct MessageWidget<'a> {
     pub node: &'a mut MessageState,
     pub depth: usize,
@@ -70,6 +78,10 @@ pub struct MessageWidget<'a> {
     pub highlight: Option<SearchHighlight>,
     /// Mark char assigned to this message, shown in the gutter on the first row.
     pub mark: Option<char>,
+    /// True when the mouse cursor is over this node.
+    pub hovered: bool,
+    /// Which sub-region of this node the cursor is over (only meaningful when hovered).
+    pub hover_target: Option<&'a HoverTarget>,
 }
 
 impl MessageWidget<'_> {
@@ -102,6 +114,8 @@ impl Widget for MessageWidget<'_> {
             Some(self.palette.resolve(&ColorVar::Primary))
         } else if self.group_descent {
             Some(self.palette.resolve(&ColorVar::PrimaryLight))
+        } else if self.hovered {
+            Some(self.palette.muted)
         } else {
             None
         };
@@ -114,21 +128,35 @@ impl Widget for MessageWidget<'_> {
         // Read node fields needed for indicator before taking mutable borrow.
         let show_indicator = self.node.show_indicator;
         let xml_tag = self.node.tag.clone();
+        let has_children = !self.node.children.is_empty();
+        let expanded = self.node.expanded;
 
         if self.skip_lines == 0 {
             let col = area.x + 1 + (self.depth * 2) as u16;
-            if let Some(cell) = buf.cell_mut((col, area.y))
-                && show_indicator
-            {
-                let (msg_indicator, msg_indicator_style) = self.style.indicator(xml_tag.as_deref());
-                let sym = msg_indicator.map(|s| if s.is_empty() { " " } else { s });
-                if let Some(sym) = sym {
-                    let render_style = if let Some(s) = msg_indicator_style {
-                        s.to_style(self.palette)
-                    } else {
-                        self.content_style()
-                    };
-                    cell.set_symbol(sym).set_style(render_style);
+            if let Some(cell) = buf.cell_mut((col, area.y)) {
+                let hovering_indicator =
+                    matches!(self.hover_target, Some(HoverTarget::IndicatorArea));
+                if show_indicator {
+                    let (msg_indicator, msg_indicator_style) =
+                        self.style.indicator(xml_tag.as_deref());
+                    let sym = msg_indicator.map(|s| if s.is_empty() { " " } else { s });
+                    // Slot is blank when indicator is None or an explicit space.
+                    let slot_blank = sym.is_none_or(|s| s == " ");
+                    if hovering_indicator && slot_blank && has_children {
+                        let hint = if expanded { "-" } else { "+" };
+                        cell.set_symbol(hint).set_fg(self.palette.muted);
+                    } else if let Some(sym) = sym {
+                        let render_style = if let Some(s) = msg_indicator_style {
+                            s.to_style(self.palette)
+                        } else {
+                            self.content_style()
+                        };
+                        cell.set_symbol(sym).set_style(render_style);
+                    }
+                } else if hovering_indicator && has_children {
+                    // show_indicator is false — slot is blank; show dimmed hint.
+                    let hint = if expanded { "-" } else { "+" };
+                    cell.set_symbol(hint).set_fg(self.palette.muted);
                 }
             }
         }
@@ -141,12 +169,23 @@ impl Widget for MessageWidget<'_> {
             height: area.height,
         };
 
+        // Inner hover slice: passed to render_content for table cell highlighting.
+        let inner_hover: Option<&[usize]> = if self.hovered && !self.interaction {
+            match self.hover_target {
+                Some(HoverTarget::Inner(v)) => Some(v.as_slice()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let ctx = ContentRenderContext {
             palette: self.palette,
             style: &self.style,
             skip_lines: self.skip_lines,
             interaction: self.interaction,
             highlight: self.highlight.as_ref(),
+            hover: inner_hover,
         };
 
         if let Some(component) = get_message_component(self.node) {
@@ -170,7 +209,7 @@ impl Widget for MessageWidget<'_> {
             }
         }
         if let Some(color) = gutter_color {
-            let stop_before_pad = self.selected && self.last_row_is_pad;
+            let stop_before_pad = self.last_row_is_pad && (self.selected || self.hovered);
             let gutter_rows = if stop_before_pad {
                 area.height.saturating_sub(1)
             } else {

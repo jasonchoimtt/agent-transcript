@@ -34,6 +34,8 @@ pub struct TableState {
     pub selected_col: usize,
     /// Column widths including padding. Empty until first layout pass.
     pub col_widths: Vec<u16>,
+    /// Per-display-row render heights (excluding borders). Populated alongside col_widths.
+    pub row_heights: Vec<u16>,
     /// Index of the first visible column (column-level horizontal scroll).
     pub scroll_x: u16,
     /// Available viewport width (columns) for the table area; set each layout pass.
@@ -51,11 +53,67 @@ impl TableState {
             selected_row: None,
             selected_col: 0,
             col_widths: vec![],
+            row_heights: vec![],
             scroll_x: 0,
             viewport_width: 0,
             user_resized: false,
             pending_y: false,
         }
+    }
+
+    /// Hit-test a position in table-space against cell boundaries.
+    /// `rel_x` is relative to `text_area.x`; `rel_y` is table-space y (0 = table top border).
+    /// Returns `Some([display_row, col])` when the coordinate falls inside a cell's
+    /// content area, `None` when on a border or outside the table.
+    pub fn match_mouse(&self, rel_x: u16, rel_y: u16) -> Option<Vec<usize>> {
+        if self.col_widths.is_empty() || self.row_heights.is_empty() {
+            return None;
+        }
+
+        // Find row: rows share their top/bottom border with neighbors (overlap=1).
+        // Row r block occupies table-space y [row_top, row_top + row_heights[r] + 2).
+        // Content (excluding borders): [row_top+1, row_top+row_heights[r]+1).
+        let num_display_rows = self.row_heights.len();
+        let mut row_top: u16 = 0;
+        let mut found_row: Option<usize> = None;
+        for r in 0..num_display_rows {
+            let h = self.row_heights[r];
+            let row_bot = row_top + h + 1; // shared bottom/next-top border
+            if rel_y > row_bot {
+                row_top = row_bot;
+                continue;
+            }
+            // On top or bottom border?
+            if rel_y == row_top || rel_y == row_bot {
+                return None;
+            }
+            found_row = Some(r);
+            break;
+        }
+        let hit_row = found_row?;
+
+        // Find col: cols share their left/right border with neighbors (overlap=1).
+        // Col 0 block: x in [0, col_widths[scroll_x]+2).
+        // Col ci block: x starts at sum_{j<ci} (col_widths[scroll_x+j] + 1).
+        let first_col = self.scroll_x as usize;
+        let mut col_x: u16 = 0;
+        let mut found_col: Option<usize> = None;
+        for (ci, &cw) in self.col_widths[first_col..].iter().enumerate() {
+            let col = first_col + ci;
+            let col_right = col_x + cw + 1; // shared right/next-left border
+            if rel_x > col_right {
+                col_x = col_right;
+                continue;
+            }
+            if rel_x == col_x || rel_x == col_right {
+                return None; // on border
+            }
+            found_col = Some(col);
+            break;
+        }
+        let hit_col = found_col?;
+
+        Some(vec![hit_row, hit_col])
     }
 
     fn selected_cell_text(&self) -> String {
@@ -141,7 +199,7 @@ impl TableState {
     }
 
     /// Adjust scroll_x so selected_col is visible.
-    fn clamp_scroll(&mut self) {
+    pub fn clamp_scroll(&mut self) {
         if self.col_widths.is_empty() {
             return;
         }
@@ -204,6 +262,7 @@ impl ComponentState for TableState {
         Some(Box::new(TableState {
             data: new_ts.data.clone(),
             col_widths: self.col_widths.clone(),
+            row_heights: self.row_heights.clone(),
             selected_col: self
                 .selected_col
                 .min(new_ts.data.headers.len().saturating_sub(1)),
@@ -324,6 +383,7 @@ impl<'a> MessageComponent for TableComponent<'a> {
         let ts = self.state_mut();
         if !ts.user_resized {
             ts.col_widths.clear();
+            ts.row_heights.clear();
         }
     }
 
@@ -331,9 +391,25 @@ impl<'a> MessageComponent for TableComponent<'a> {
         let ts = self.state_mut();
         if ts.col_widths.is_empty() {
             ts.col_widths = compute_col_widths(&ts.data, available_width, palette);
+            // Recompute row heights whenever col_widths are recomputed.
+            let num_display_rows = ts.data.rows.len() + 1;
+            ts.row_heights = (0..num_display_rows)
+                .map(|r| {
+                    let cells: &[String] = if r == 0 {
+                        &ts.data.headers
+                    } else {
+                        &ts.data.rows[r - 1]
+                    };
+                    row_render_height(cells, &ts.col_widths, palette)
+                })
+                .collect();
         }
         ts.viewport_width = available_width;
         Some(compute_table_height(ts, palette))
+    }
+
+    fn match_mouse(&self, rel_x: u16, rel_y: u16) -> Option<Vec<usize>> {
+        self.state().match_mouse(rel_x, rel_y)
     }
 
     fn render_content(&self, area: Rect, buf: &mut Buffer, ctx: &ContentRenderContext<'_>) {
@@ -709,5 +785,105 @@ mod tests {
         state_mut(&mut msg).user_resized = true;
         TableComponent { message: &mut msg }.on_viewport_width_changed();
         assert_eq!(state(&msg).col_widths, vec![10, 20]);
+    }
+
+    // ── match_mouse ───────────────────────────────────────────────────────────
+
+    fn ts_with_layout() -> TableState {
+        // 2 cols (cw=10 each), 2 display rows (header + 1 data row, each height=1)
+        // Col 0 block: x=[0,12), content x=[1,11)
+        // Col 1 block: x=[11,23), content x=[12,22)
+        // Row 0 (header) block: y=[0,3), content y=[1,2)
+        // Row 1 (data)   block: y=[2,5), content y=[3,4)
+        TableState {
+            data: TableData {
+                headers: vec!["H1".into(), "H2".into()],
+                rows: vec![vec!["A".into(), "B".into()]],
+            },
+            selected_row: None,
+            selected_col: 0,
+            col_widths: vec![10, 10],
+            row_heights: vec![1, 1],
+            scroll_x: 0,
+            viewport_width: 24,
+            user_resized: false,
+            pending_y: false,
+        }
+    }
+
+    #[test]
+    fn match_mouse_header_col0() {
+        let ts = ts_with_layout();
+        // Inside header row (display_row=0), col 0: rel_y=1 (content), rel_x=5 (content)
+        assert_eq!(ts.match_mouse(5, 1), Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn match_mouse_header_col1() {
+        let ts = ts_with_layout();
+        // Col 1 content starts at rel_x=12; rel_y=1 (header content)
+        assert_eq!(ts.match_mouse(15, 1), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn match_mouse_data_row_col0() {
+        let ts = ts_with_layout();
+        // Data row 0 (display_row=1), content at rel_y=3; col 0 content at rel_x=5
+        assert_eq!(ts.match_mouse(5, 3), Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn match_mouse_data_row_col1() {
+        let ts = ts_with_layout();
+        assert_eq!(ts.match_mouse(15, 3), Some(vec![1, 1]));
+    }
+
+    #[test]
+    fn match_mouse_top_border_returns_none() {
+        let ts = ts_with_layout();
+        // rel_y=0 is the table top border
+        assert_eq!(ts.match_mouse(5, 0), None);
+    }
+
+    #[test]
+    fn match_mouse_shared_row_border_returns_none() {
+        let ts = ts_with_layout();
+        // rel_y=2 is shared border between header and data row
+        assert_eq!(ts.match_mouse(5, 2), None);
+    }
+
+    #[test]
+    fn match_mouse_bottom_border_returns_none() {
+        let ts = ts_with_layout();
+        // rel_y=4 is the bottom border of the data row
+        assert_eq!(ts.match_mouse(5, 4), None);
+    }
+
+    #[test]
+    fn match_mouse_left_border_returns_none() {
+        let ts = ts_with_layout();
+        // rel_x=0 is the left border of col 0
+        assert_eq!(ts.match_mouse(0, 1), None);
+    }
+
+    #[test]
+    fn match_mouse_shared_col_border_returns_none() {
+        let ts = ts_with_layout();
+        // rel_x=11 is shared border between col 0 and col 1
+        assert_eq!(ts.match_mouse(11, 1), None);
+    }
+
+    #[test]
+    fn match_mouse_empty_col_widths_returns_none() {
+        let mut ts = ts_with_layout();
+        ts.col_widths.clear();
+        assert_eq!(ts.match_mouse(5, 1), None);
+    }
+
+    #[test]
+    fn match_mouse_empty_row_heights_returns_none() {
+        let mut ts = ts_with_layout();
+        ts.row_heights.clear();
+        assert_eq!(ts.match_mouse(5, 1), None);
     }
 }

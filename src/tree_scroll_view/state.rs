@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ansi_to_tui::IntoText;
 use crossterm::event::{KeyEvent, MouseEvent};
+use ratatui::layout::Rect;
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -9,12 +10,27 @@ use super::ansi::visual_width;
 use super::cursor::TreeCursor;
 use super::handler::{KeyParser, TreeAction};
 use super::markdown::render_markdown;
-use super::message_widget::get_message_component;
+use super::message_widget::{get_message_component, match_mouse_node};
 use super::predicates::nonzero_height;
 use crate::reader_op::ReaderOp;
 use crate::theme::Theme;
 use crate::tree_operation::TreeOperation;
-use crate::tree_scroll_view::message_widget::component::{ComponentKeyResult, ComponentState};
+use crate::tree_scroll_view::message_widget::component::{
+    ComponentKeyResult, ComponentState, HoverState, MouseHitResult,
+};
+
+// ── MessageRenderInfo ─────────────────────────────────────────────────────────
+
+pub struct MessageRenderInfo {
+    pub path: Vec<usize>,
+    pub widget_area: Rect,
+    pub has_gap_row: bool,
+    pub hidden_after: usize,
+    /// Lines of node content skipped at the top of this widget_area (partial first node).
+    pub skip_lines: u16,
+    /// Visual depth used when rendering (counts only ancestors with `indent_children: true`).
+    pub visual_depth: usize,
+}
 
 pub use super::search::{PendingSearch, SearchHighlight, SearchState, highlight_text_spans};
 
@@ -530,6 +546,10 @@ pub struct TreeScrollViewState {
     /// Screen position of the terminal widget from the last render: (x, y, area_height, skip).
     /// Set by TreeScrollView::render; used by app.rs to place the PTY cursor.
     pub terminal_render_info: Option<(u16, u16, u16, u16)>,
+    /// Per-message render rectangles from the last render pass, used for mouse hit-testing.
+    pub render_rects: Vec<MessageRenderInfo>,
+    /// Current mouse hover state; updated on every MouseMoved event.
+    pub hover: Option<HoverState>,
     pub theme: Theme,
     pub key_parser: KeyParser,
     /// Committed search (set on Enter).
@@ -593,6 +613,8 @@ impl TreeScrollViewState {
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
             terminal_render_info: None,
+            render_rects: vec![],
+            hover: None,
             theme: Theme::default_dark(),
             key_parser: KeyParser::new(),
             search: None,
@@ -1709,6 +1731,17 @@ impl TreeScrollViewState {
         }
     }
 
+    /// Returns true when the selected node has content that would be hidden in compact mode,
+    /// i.e. toggling show_more would actually change what is rendered.
+    pub fn selection_can_show_more(&self) -> bool {
+        let path = &self.selection_index;
+        let visual_depth = TreeCursor::at(&self.items, path.clone())
+            .map(|c| c.depth())
+            .unwrap_or(0);
+        get_node(&self.items, path)
+            .is_some_and(|n| content_needs_show_more(n, self.viewport_width, visual_depth))
+    }
+
     pub fn toggle_show_more(&mut self) {
         self.at_bottom = false;
         let path = self.selection_index.clone();
@@ -1840,6 +1873,13 @@ impl TreeScrollViewState {
             hide_all_revealed(&mut self.items);
         }
         self.rectify_selection_and_top();
+    }
+
+    /// Select the given path, updating precedence so it scrolls into view.
+    pub fn select_path(&mut self, path: Vec<usize>) {
+        self.selection_index = path;
+        self.at_bottom = false;
+        self.precedence = Precedence::Selection;
     }
 
     /// Reveal the next `n` contiguous `Hidden` nodes in DFS order after the
@@ -2310,6 +2350,7 @@ impl TreeScrollViewState {
             TreeAction::RevealJumpForward => self.reveal_jump_forward(),
             TreeAction::RevealJumpBackward => self.reveal_jump_backward(),
             TreeAction::ToggleAllHidden => self.toggle_all_hidden(),
+            TreeAction::ToggleShowMore => {} // handled in App::apply_tree_action
             TreeAction::TerminalActivate
             | TreeAction::Quit
             | TreeAction::None
@@ -2349,6 +2390,8 @@ impl TreeScrollViewState {
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
             terminal_render_info: None,
+            render_rects: vec![],
+            hover: None,
             theme: Theme::default_dark(),
             key_parser: KeyParser::new(),
             search: None,
@@ -2403,5 +2446,61 @@ impl TreeScrollViewState {
             row: live_row,
             modifiers: ev.modifiers,
         })
+    }
+
+    /// Hit-test a screen coordinate against the last render pass's rectangles.
+    pub fn hit_test(&mut self, x: u16, y: u16) -> MouseHitResult {
+        // 1. Check terminal area.
+        if let Some((tx, ty, th, _skip)) = self.terminal_render_info
+            && x >= tx
+            && x < tx + self.viewport_width
+            && y >= ty
+            && y < ty + th
+        {
+            return MouseHitResult::Terminal;
+        }
+
+        // 2. Iterate render rects.
+        for i in 0..self.render_rects.len() {
+            let wa = self.render_rects[i].widget_area;
+            if x < wa.x || x >= wa.x + wa.width || y < wa.y || y >= wa.y + wa.height {
+                continue;
+            }
+
+            let depth = self.render_rects[i].visual_depth;
+            let indicator_x = wa.x + 1 + (depth * 2) as u16;
+            let has_gap_row = self.render_rects[i].has_gap_row;
+            let hidden_after = self.render_rects[i].hidden_after;
+            let skip_lines = self.render_rects[i].skip_lines;
+            let path = self.render_rects[i].path.clone();
+
+            // a. Gap row (last row of the widget, only when hidden nodes follow).
+            if has_gap_row && hidden_after > 0 && y == wa.y + wa.height - 1 {
+                return MouseHitResult::GapRow { path, hidden_after };
+            }
+
+            // b. Indicator area (indicator col + space col).
+            if x >= indicator_x && x < indicator_x + 2 {
+                return MouseHitResult::IndicatorArea { path };
+            }
+
+            // c. Inner component hit-test (via MessageComponent trait — no downcast).
+            let prefix_len = depth * 2 + 2;
+            let content_x = wa.x + 1 + prefix_len as u16;
+            if x >= content_x {
+                let rel_x = x - content_x;
+                let rel_y = (y - wa.y) + skip_lines;
+                if let Some(node) = get_node_mut(&mut self.items, &path)
+                    && let Some(hit) = match_mouse_node(node, rel_x, rel_y)
+                {
+                    return MouseHitResult::InnerComponent { path, hit };
+                }
+            }
+
+            // d. Generic message body.
+            return MouseHitResult::Message { path };
+        }
+
+        MouseHitResult::Outside
     }
 }

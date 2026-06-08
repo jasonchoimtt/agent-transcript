@@ -2227,3 +2227,156 @@ fn search_is_case_insensitive() {
         "case-insensitive search should match 'Hello'"
     );
 }
+
+// ── hit_test ─────────────────────────────────────────────────────────────────
+
+use super::state::MessageRenderInfo;
+use crate::tree_scroll_view::message_widget::component::MouseHitResult;
+use ratatui::layout::Rect;
+
+fn make_render_info(
+    path: Vec<usize>,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    has_gap_row: bool,
+    hidden_after: usize,
+) -> MessageRenderInfo {
+    let visual_depth = path.len().saturating_sub(1);
+    MessageRenderInfo {
+        path,
+        widget_area: Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        },
+        has_gap_row,
+        hidden_after,
+        skip_lines: 0,
+        visual_depth,
+    }
+}
+
+#[test]
+fn hit_test_terminal_in_bounds() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    state.viewport_width = 80;
+    // terminal at y=20, height=4
+    state.terminal_render_info = Some((0, 20, 4, 0));
+    let result = state.hit_test(10, 21);
+    assert!(matches!(result, MouseHitResult::Terminal));
+}
+
+#[test]
+fn hit_test_terminal_out_of_bounds() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    state.viewport_width = 80;
+    state.terminal_render_info = Some((0, 20, 4, 0));
+    // y=19 is above the terminal
+    let result = state.hit_test(10, 19);
+    assert!(matches!(result, MouseHitResult::Outside));
+}
+
+#[test]
+fn hit_test_gap_row_with_hidden() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    // Message at y=0..10, has_gap_row with 3 hidden after
+    state
+        .render_rects
+        .push(make_render_info(vec![0], 0, 0, 80, 10, true, 3));
+    // Gap row is the last row: y=9
+    let result = state.hit_test(5, 9);
+    assert!(
+        matches!(
+            result,
+            MouseHitResult::GapRow {
+                hidden_after: 3,
+                ..
+            }
+        ),
+        "expected GapRow, got something else"
+    );
+}
+
+#[test]
+fn hit_test_gap_row_no_hidden_falls_through_to_message() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    // has_gap_row but hidden_after=0 → last row is NOT a gap row hit
+    state
+        .render_rects
+        .push(make_render_info(vec![0], 0, 0, 80, 10, true, 0));
+    // Last row y=9 should not be GapRow
+    let result = state.hit_test(5, 9);
+    assert!(matches!(result, MouseHitResult::Message { .. }));
+}
+
+#[test]
+fn hit_test_indicator_area_depth_zero() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    // Depth 0 → indicator at x = area.x + 1 + 0 = 1
+    state
+        .render_rects
+        .push(make_render_info(vec![0], 0, 0, 80, 5, false, 0));
+    // x=1 (indicator), x=2 (space after indicator) — both in indicator area
+    assert!(matches!(
+        state.hit_test(1, 2),
+        MouseHitResult::IndicatorArea { .. }
+    ));
+    assert!(matches!(
+        state.hit_test(2, 2),
+        MouseHitResult::IndicatorArea { .. }
+    ));
+    // x=3 is after the indicator → Message
+    assert!(matches!(
+        state.hit_test(3, 2),
+        MouseHitResult::Message { .. }
+    ));
+}
+
+#[test]
+fn hit_test_indicator_area_depth_one() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    // Depth 1 (path len 2) → indicator at x = 0 + 1 + 2 = 3
+    state
+        .render_rects
+        .push(make_render_info(vec![0, 0], 0, 0, 80, 5, false, 0));
+    assert!(matches!(
+        state.hit_test(3, 2),
+        MouseHitResult::IndicatorArea { .. }
+    ));
+    assert!(matches!(
+        state.hit_test(4, 2),
+        MouseHitResult::IndicatorArea { .. }
+    ));
+}
+
+#[test]
+fn hit_test_message_body() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    // Depth 0, gutter at x=0, indicator at x=1, space at x=2, content from x=3
+    state
+        .render_rects
+        .push(make_render_info(vec![0], 0, 0, 80, 5, false, 0));
+    // x=0 is gutter → Message (not indicator)
+    assert!(matches!(
+        state.hit_test(0, 2),
+        MouseHitResult::Message { .. }
+    ));
+    // x=3 starts content → Message (no InnerComponent since no ui_state)
+    assert!(matches!(
+        state.hit_test(10, 2),
+        MouseHitResult::Message { .. }
+    ));
+}
+
+#[test]
+fn hit_test_outside() {
+    let mut state = TreeScrollViewState::new(vec![]);
+    state
+        .render_rects
+        .push(make_render_info(vec![0], 0, 0, 80, 5, false, 0));
+    // y=10 is outside the widget_area (height=5, so y in [0,5))
+    assert!(matches!(state.hit_test(5, 10), MouseHitResult::Outside));
+}

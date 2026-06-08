@@ -106,6 +106,7 @@ pub fn render_table(
     // ── Styles ────────────────────────────────────────────────────────────────
     let border_style = style.border.to_style(ctx.palette);
     let border_sel_style = style.border_selected.to_style(ctx.palette);
+    let border_hover_style = ratatui::style::Style::new().fg(ctx.palette.accent);
     let header_style = style.header.to_style(ctx.palette);
     let scroll_ind_style = style.scroll_indicator.to_style(ctx.palette);
 
@@ -181,12 +182,15 @@ pub fn render_table(
                 borders
             };
 
-            let col_bs = if ctx.interaction && col == state.selected_col {
+            let is_selected_cell = is_selected_row && ctx.interaction && col == state.selected_col;
+            let is_hovered_cell = !ctx.interaction && ctx.hover.is_some_and(|h| h == [r, col]);
+            let col_bs = if is_hovered_cell {
+                border_hover_style
+            } else if ctx.interaction && col == state.selected_col {
                 border_sel_style
             } else {
                 border_style
             };
-            let is_selected_cell = is_selected_row && ctx.interaction && col == state.selected_col;
 
             let block = Block::new()
                 .borders(safe_borders)
@@ -256,6 +260,47 @@ pub fn render_table(
                 para = para.style(style.cell_selected.to_style(ctx.palette));
             }
             para.render(content_area, buf);
+        }
+    }
+
+    // Re-draw the hovered cell's border edges that are overwritten by subsequent renders:
+    // - right edge: overwritten by next column's left border
+    // - bottom edge (incl. corners): overwritten by next row's top border
+    if let Some(h) = ctx.hover
+        && h.len() == 2
+        && !ctx.interaction
+    {
+        let (hr, hcol) = (h[0], h[1]);
+        if let Some(ci) = hcol.checked_sub(first_col)
+            && ci < col_areas.len()
+            && hr < num_display_rows
+        {
+            let block_top = table_offset + row_areas[hr].y as i32;
+            let block_bot = block_top + row_areas[hr].height as i32;
+            let vis_top = block_top.max(area_top) as u16;
+            let vis_bot = block_bot.min(area_bot) as u16;
+            let left_x = col_areas[ci].x;
+            let right_x = col_areas[ci].x + col_areas[ci].width - 1;
+            let right_x_clipped = right_x.min(text_area.x + text_area.width - 1);
+
+            // Right edge.
+            if right_x < text_area.x + text_area.width {
+                for y in vis_top..vis_bot {
+                    if let Some(cell) = buf.cell_mut((right_x, y)) {
+                        cell.set_style(border_hover_style);
+                    }
+                }
+            }
+
+            // Bottom edge (including bottom-left and bottom-right corners).
+            let bottom_y = block_bot - 1;
+            if bottom_y >= area_top && bottom_y < area_bot {
+                for x in left_x..=right_x_clipped {
+                    if let Some(cell) = buf.cell_mut((x, bottom_y as u16)) {
+                        cell.set_style(border_hover_style);
+                    }
+                }
+            }
         }
     }
 

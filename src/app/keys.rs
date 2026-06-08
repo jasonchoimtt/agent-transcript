@@ -448,7 +448,7 @@ impl App {
         }
     }
 
-    fn apply_tree_action(&mut self, action: TreeAction) {
+    pub(super) fn apply_tree_action(&mut self, action: TreeAction) {
         match action {
             TreeAction::Quit => {
                 if self.terminal.is_live() {
@@ -525,6 +525,11 @@ impl App {
             }
             TreeAction::PopJump => {
                 self.tree_state.pop_jump();
+            }
+            TreeAction::ToggleShowMore => {
+                if self.tree_state.selection_can_show_more() {
+                    self.tree_state.toggle_show_more();
+                }
             }
             action => self.tree_state.apply_action(action),
         }

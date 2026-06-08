@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use serde_json::Value;
 
 use crate::tree_scroll_view::state::get_node;
@@ -13,18 +14,22 @@ const KIND_RAW: &str = "raw";
 
 pub struct DataViewState {
     pub tree: TreeScrollViewState,
+    /// Popup rect (including border) set during each render pass; used for mouse hit-testing.
+    pub popup_area: Rect,
 }
 
 impl DataViewState {
     pub fn new(data: &str) -> Self {
         Self {
             tree: build_tree(data),
+            popup_area: Rect::default(),
         }
     }
 
     pub fn from_nodes(nodes: Vec<MessageState>) -> Self {
         Self {
             tree: TreeScrollViewState::new_without_terminal(nodes),
+            popup_area: Rect::default(),
         }
     }
 

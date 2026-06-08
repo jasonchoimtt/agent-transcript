@@ -9,6 +9,41 @@ use crate::theme::styles::MessageStyle;
 use crate::tree_scroll_view::MessageState;
 use crate::tree_scroll_view::search::SearchHighlight;
 
+// ── Hover types ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum HoverTarget {
+    Message,
+    IndicatorArea,
+    GapRow { hidden_after: usize },
+    Inner(Vec<usize>),
+}
+
+#[derive(Clone, Debug)]
+pub struct HoverState {
+    pub path: Vec<usize>,
+    pub target: HoverTarget,
+}
+
+pub enum MouseHitResult {
+    Terminal,
+    GapRow {
+        path: Vec<usize>,
+        hidden_after: usize,
+    },
+    IndicatorArea {
+        path: Vec<usize>,
+    },
+    InnerComponent {
+        path: Vec<usize>,
+        hit: Vec<usize>,
+    },
+    Message {
+        path: Vec<usize>,
+    },
+    Outside,
+}
+
 // ── ComponentState ────────────────────────────────────────────────────────────
 
 /// Minimal marker trait for per-node widget state stored in `MessageState::ui_state`.
@@ -59,6 +94,9 @@ pub struct ContentRenderContext<'a> {
     pub skip_lines: u16,
     pub interaction: bool,
     pub highlight: Option<&'a SearchHighlight>,
+    /// Inner hit data from `match_mouse` when a table cell (or similar) is hovered.
+    /// Set only when `hovered && !interaction && target is HoverTarget::Inner(_)`.
+    pub hover: Option<&'a [usize]>,
 }
 
 /// Unified component trait implemented by transient structs that borrow
@@ -90,6 +128,15 @@ pub trait MessageComponent {
     /// Perform a layout pass given `available_width` and return the computed
     /// node height, or `None` to fall back to the default text-height path.
     fn layout_pass(&mut self, _available_width: u16, _palette: &Palette) -> Option<u16> {
+        None
+    }
+
+    /// Hit-test a position within this component's content area.
+    /// `rel_x` is relative to the content area's left edge; `rel_y` is in table-space
+    /// (0 = component top, including any skip_lines offset).
+    /// Returns an opaque `Vec<usize>` that only this component knows how to interpret.
+    /// Default returns `None` (no inner hit region).
+    fn match_mouse(&self, _rel_x: u16, _rel_y: u16) -> Option<Vec<usize>> {
         None
     }
 

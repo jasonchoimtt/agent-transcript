@@ -15,8 +15,6 @@ use crate::event::{AppEvent, Event, EventHandler};
 use crate::log_buffer::LogBuffer;
 use crate::picker::state::PickerState;
 use crate::providers::{LoadConfig, Provider, ProviderKind, TranscriptEntry};
-use crate::terminal::mouse::encode_mouse_event;
-use crate::terminal::osc::MouseMode;
 use crate::terminal::{PanelState, SessionInfo, TerminalPanel};
 use crate::theme::Theme;
 use crate::transforms::{build_pipeline, build_transforms};
@@ -304,56 +302,7 @@ impl App {
                     self.handle_key(key, last_area).await;
                 }
                 Event::Crossterm(crossterm::event::Event::Mouse(ev)) => {
-                    use crossterm::event::MouseEventKind;
-                    match ev.kind {
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            if ev.kind == MouseEventKind::ScrollUp && self.mode == AppMode::Terminal
-                            {
-                                self.mode = AppMode::Normal;
-                                let _ = std::io::stdout().write_all(b"\x1b[0 q");
-                                let _ = std::io::stdout().flush();
-                            }
-                            let mut count = 1;
-
-                            // Try to batch consecutive scroll events
-                            while let Some(event2) = self.events.try_recv() {
-                                match event2 {
-                                    Event::Crossterm(crossterm::event::Event::Mouse(ev2))
-                                        if ev2.kind == ev.kind =>
-                                    {
-                                        count += 1
-                                    }
-                                    other => {
-                                        self.events.unget(other);
-                                        break;
-                                    }
-                                }
-                            }
-                            match ev.kind {
-                                MouseEventKind::ScrollUp => self.tree_state.scroll_up(count * 3),
-                                MouseEventKind::ScrollDown => {
-                                    self.tree_state.scroll_down(count * 3)
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        _ => {
-                            if self.mode == AppMode::Terminal {
-                                let translated = self.tree_state.translate_mouse_to_pty(ev);
-                                if let Some(term) = self.terminal.live_ts()
-                                    && term.mouse_mode != MouseMode::Off
-                                    && let Some(translated) = translated
-                                    && let Some(bytes) = encode_mouse_event(
-                                        translated,
-                                        term.mouse_mode,
-                                        term.mouse_encoding,
-                                    )
-                                {
-                                    term.write_input(&bytes);
-                                }
-                            }
-                        }
-                    }
+                    self.handle_mouse(ev);
                 }
                 Event::Crossterm(event) => {
                     if let Some(term) = self.terminal.live_ts() {
@@ -809,6 +758,7 @@ impl App {
 
 mod draw;
 mod keys;
+mod mouse;
 
 #[cfg(test)]
 mod tests {

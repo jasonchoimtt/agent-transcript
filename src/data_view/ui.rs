@@ -17,6 +17,7 @@ impl StatefulWidget for DataViewUi<'_> {
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let popup = centered(area, 80, 80);
+        state.popup_area = popup;
 
         Clear.render(popup, buf);
 
