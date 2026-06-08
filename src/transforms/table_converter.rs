@@ -3,8 +3,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use crate::config::TableConverterConfig;
 use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
+use crate::tree_scroll_view::message_widget::table::{TableData, TableState};
 use crate::tree_scroll_view::state::{MessageState, MessageType};
-use crate::tree_scroll_view::table::{TableData, TableState};
 
 /// Converts AgentMessage nodes whose text is a single GFM table block into
 /// `MessageType::Table` nodes carrying a `TableState`.

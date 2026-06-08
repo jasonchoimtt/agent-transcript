@@ -4,8 +4,10 @@ use crate::transforms::Transform;
 use crate::transforms::tool_formatter::filter_path;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::message_widget::component::ComponentState;
+use crate::tree_scroll_view::message_widget::tool_result::{
+    PatchHunk, ToolResultState, render::make_brief,
+};
 use crate::tree_scroll_view::state::{MessageState, MessageType};
-use crate::tree_scroll_view::tool_result::{PatchHunk, ToolResultState, render::make_brief};
 
 /// Detects ToolResult nodes carrying structured tool output JSON and attaches a
 /// [`ToolResultState`] so they render as rich widgets. Supports Claude and Cursor providers.
@@ -351,7 +353,9 @@ mod tests {
     use super::*;
     use crate::config::FileDeltaWidgetConfig;
     use crate::providers::ProviderKind;
-    use crate::tree_scroll_view::tool_result::{ToolResultPayload, ToolResultState};
+    use crate::tree_scroll_view::message_widget::tool_result::{
+        ToolResultPayload, ToolResultState,
+    };
 
     fn enricher() -> ToolResultEnricher {
         ToolResultEnricher::new(

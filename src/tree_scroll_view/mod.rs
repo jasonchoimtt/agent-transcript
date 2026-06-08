@@ -10,8 +10,6 @@ pub mod search;
 pub mod state;
 #[cfg(test)]
 mod tests;
-pub use message_widget::table;
-pub use message_widget::tool_result;
 pub mod ui;
 
 pub use cursor::TreeCursor;
