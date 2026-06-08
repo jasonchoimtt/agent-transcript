@@ -30,7 +30,7 @@ agt aims to change that, by providing a lightweight and well-designed TUI wrappe
 ### Using Cargo
 
 ```bash
-cargo install
+cargo install agent-transcript
 ```
 
 If you don't have Cargo installed yet, you can use the [rustup installer](https://rustup.rs/).
