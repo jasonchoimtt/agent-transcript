@@ -37,6 +37,8 @@ pub struct MessageWidget<'a> {
     pub interaction: bool,
     /// Non-None when this node contains the current search match.
     pub highlight: Option<SearchHighlight>,
+    /// Mark char assigned to this message, shown in the gutter on the first row.
+    pub mark: Option<char>,
 }
 
 impl MessageWidget<'_> {
@@ -212,6 +214,21 @@ impl Widget for MessageWidget<'_> {
         }
 
         // Selection gutter at col 0.
+        // First row: show mark char when present (muted if unselected, white-on-primary if selected).
+        // Remaining rows: show ▌ in the selection color as before.
+        let show_mark_on_first = self.mark.is_some() && self.skip_lines == 0;
+        if show_mark_on_first
+            && let (Some(ch), Some(cell)) = (self.mark, buf.cell_mut((area.x, area.y)))
+        {
+            if self.selected {
+                let bg = self.palette.resolve(&ColorVar::Primary);
+                cell.set_symbol(&ch.to_string())
+                    .set_fg(ratatui::style::Color::White)
+                    .set_bg(bg);
+            } else {
+                cell.set_symbol(&ch.to_string()).set_fg(self.palette.muted);
+            }
+        }
         if let Some(color) = gutter_color {
             let stop_before_pad = self.selected && self.last_row_is_pad;
             let gutter_rows = if stop_before_pad {
@@ -220,6 +237,9 @@ impl Widget for MessageWidget<'_> {
                 area.height
             };
             for row in 0..gutter_rows {
+                if row == 0 && show_mark_on_first {
+                    continue;
+                }
                 if let Some(cell) = buf.cell_mut((area.x, area.y + row)) {
                     cell.set_symbol("▌").set_fg(color);
                 }

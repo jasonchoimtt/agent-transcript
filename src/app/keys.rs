@@ -303,7 +303,7 @@ impl App {
         // If a multi-key prefix is pending (e.g. `y` waiting for `yr`/`yt`/`yy`),
         // forward directly to the tree handler so single-key shortcuts below can't
         // intercept the second key.
-        if self.tree_state.key_parser.pending_char().is_some() {
+        if self.tree_state.key_parser.pending_prefix().is_some() {
             let action = self
                 .tree_state
                 .handle_key(key, last_area.height.saturating_sub(1));
@@ -362,10 +362,19 @@ impl App {
             self.screen = AppScreen::Picker;
             self.start_picker_refresh(cwd);
         } else if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('t')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            // Ctrl-T: pop jump list.
+            self.tree_state.pop_jump();
+        } else if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('y')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            // Ctrl-Y: launch terminal.
+            // Ctrl-Y: launch terminal; push jump if not already at bottom.
+            if !self.tree_state.at_bottom {
+                self.tree_state.push_jump();
+            }
             self.try_launch_deferred_terminal();
         } else if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('m')
@@ -389,14 +398,16 @@ impl App {
             // Shift-I: open session info view.
             self.open_session_info();
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('/') {
-            // /: enter forward search.
+            // /: enter forward search; push jump so Ctrl-T returns here.
+            self.tree_state.push_jump();
             self.mode = AppMode::SearchInput {
                 query: String::new(),
                 backward: false,
             };
             self.active_tree_state_mut().search_pending("", false);
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('?') {
-            // ?: enter backward search.
+            // ?: enter backward search; push jump so Ctrl-T returns here.
+            self.tree_state.push_jump();
             self.mode = AppMode::SearchInput {
                 query: String::new(),
                 backward: true,
@@ -406,10 +417,12 @@ impl App {
             && key.code == KeyCode::Char('n')
             && !key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            // n: next search match.
+            // n: next search match; push jump first.
+            self.tree_state.push_jump();
             self.active_tree_state_mut().search_next();
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('N') {
-            // N: previous search match (opposite direction).
+            // N: previous search match; push jump first.
+            self.tree_state.push_jump();
             self.active_tree_state_mut().search_prev();
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('!') {
             // !: begin composite key sequence (!l / !L).
@@ -470,6 +483,9 @@ impl App {
             // Ctrl-O / Esc only activates when a live PTY is running.
             TreeAction::TerminalActivate => {
                 if self.terminal.is_live() {
+                    if !self.tree_state.at_bottom {
+                        self.tree_state.push_jump();
+                    }
                     self.activate_terminal();
                 }
             }
@@ -485,6 +501,25 @@ impl App {
             TreeAction::CopyRawData => {
                 let data = self.tree_state.selected_data().to_owned();
                 self.do_copy(&data);
+            }
+            TreeAction::SelectFirst | TreeAction::SelectLastContent => {
+                self.tree_state.push_jump();
+                self.tree_state.apply_action(action);
+            }
+            TreeAction::SetMark(ch) => {
+                self.tree_state.set_mark(ch);
+                self.save_marks();
+            }
+            TreeAction::DeleteMark(ch) => {
+                self.tree_state.marks.delete(ch);
+                self.save_marks();
+            }
+            TreeAction::GotoMark(ch) => {
+                self.tree_state.push_jump();
+                self.tree_state.goto_mark(ch);
+            }
+            TreeAction::PopJump => {
+                self.tree_state.pop_jump();
             }
             action => self.tree_state.apply_action(action),
         }

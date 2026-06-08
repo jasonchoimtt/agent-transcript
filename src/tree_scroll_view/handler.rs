@@ -49,12 +49,18 @@ pub enum TreeAction {
     RevealJumpBackward,
     // global hidden toggle
     ToggleAllHidden,
+    // marks and jump list
+    SetMark(char),
+    DeleteMark(char),
+    GotoMark(char),
+    PopJump,
     Quit,
     None,
 }
 
 pub struct KeyParser {
-    pending: Option<KeyCode>,
+    /// Accumulated prefix keys for multi-key sequences (up to 2 deep currently).
+    pending: Vec<KeyCode>,
 }
 
 impl Default for KeyParser {
@@ -65,33 +71,48 @@ impl Default for KeyParser {
 
 impl KeyParser {
     pub fn new() -> Self {
-        Self { pending: None }
+        Self {
+            pending: Vec::new(),
+        }
     }
 
     pub fn reset(&mut self) {
-        self.pending = None;
+        self.pending.clear();
     }
 
-    /// Returns the pending prefix character if a multi-key sequence is in progress.
-    pub fn pending_char(&self) -> Option<char> {
-        match self.pending {
-            Some(KeyCode::Char(c)) => Some(c),
-            _ => None,
+    /// Returns the accumulated prefix string if a multi-key sequence is in progress
+    /// (e.g. `"d"` after pressing `d`, `"dm"` after pressing `d` then `m`).
+    pub fn pending_prefix(&self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
         }
+        let s: String = self
+            .pending
+            .iter()
+            .filter_map(|k| {
+                if let KeyCode::Char(c) = k {
+                    Some(*c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if s.is_empty() { None } else { Some(s) }
     }
 
     pub fn process(&mut self, key: KeyEvent, area_height: u16) -> TreeAction {
         if key.kind != KeyEventKind::Press {
-            self.pending = None;
+            self.pending.clear();
             return TreeAction::None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let page = area_height.saturating_sub(1).max(1);
 
-        // Handle pending prefix
-        if let Some(prefix) = self.pending.take() {
-            return match prefix {
-                KeyCode::Char('z') => match key.code {
+        // Handle pending prefix(es).
+        if !self.pending.is_empty() {
+            let prefix = std::mem::take(&mut self.pending);
+            return match prefix.as_slice() {
+                [KeyCode::Char('z')] => match key.code {
                     KeyCode::Char('t') => TreeAction::ScrollSelectionToTop,
                     KeyCode::Char('z') => TreeAction::ScrollSelectionToMiddle,
                     KeyCode::Char('b') => TreeAction::ScrollSelectionToBottom,
@@ -100,20 +121,42 @@ impl KeyParser {
                     KeyCode::Char('K') => TreeAction::RevealJumpBackward,
                     _ => TreeAction::None,
                 },
-                KeyCode::Char('y') => match key.code {
+                [KeyCode::Char('y')] => match key.code {
                     KeyCode::Char('y') => TreeAction::CopyMarkdown,
                     KeyCode::Char('t') => TreeAction::CopyPlainText,
                     KeyCode::Char('r') => TreeAction::CopyRawData,
                     _ => TreeAction::None,
                 },
-                KeyCode::Char(']') => match key.code {
+                [KeyCode::Char(']')] => match key.code {
                     KeyCode::Char(']') => TreeAction::SelectNextTurnStart,
                     KeyCode::Char('[') => TreeAction::SelectNextTurnEnd,
                     _ => TreeAction::None,
                 },
-                KeyCode::Char('[') => match key.code {
+                [KeyCode::Char('[')] => match key.code {
                     KeyCode::Char('[') => TreeAction::SelectPrevTurnStart,
                     KeyCode::Char(']') => TreeAction::SelectPrevTurnEnd,
+                    _ => TreeAction::None,
+                },
+                [KeyCode::Char('m')] => match key.code {
+                    KeyCode::Char(c) if c.is_alphabetic() => TreeAction::SetMark(c),
+                    _ => TreeAction::None,
+                },
+                [KeyCode::Char('\'')] | [KeyCode::Char('`')] => match key.code {
+                    KeyCode::Char(c) if c.is_alphabetic() => TreeAction::GotoMark(c),
+                    _ => TreeAction::None,
+                },
+                // d → wait for second key
+                [KeyCode::Char('d')] => match key.code {
+                    KeyCode::Char('m') => {
+                        self.pending.push(KeyCode::Char('d'));
+                        self.pending.push(KeyCode::Char('m'));
+                        TreeAction::None
+                    }
+                    _ => TreeAction::None,
+                },
+                // dm → wait for mark char
+                [KeyCode::Char('d'), KeyCode::Char('m')] => match key.code {
+                    KeyCode::Char(c) if c.is_alphabetic() => TreeAction::DeleteMark(c),
                     _ => TreeAction::None,
                 },
                 _ => TreeAction::None,
@@ -156,23 +199,41 @@ impl KeyParser {
             // Y: immediate copy markdown; y prefix: yy/yt/yr for copy variants
             KeyCode::Char('Y') => TreeAction::CopyMarkdown,
             KeyCode::Char('y') => {
-                self.pending = Some(KeyCode::Char('y'));
+                self.pending.push(KeyCode::Char('y'));
                 TreeAction::None
             }
 
-            // z / [ / ] prefix: wait for second key
+            // z / [ / ] / m / ' / ` / d prefix: wait for second key
             KeyCode::Char('z') => {
-                self.pending = Some(KeyCode::Char('z'));
+                self.pending.push(KeyCode::Char('z'));
                 TreeAction::None
             }
             KeyCode::Char(']') => {
-                self.pending = Some(KeyCode::Char(']'));
+                self.pending.push(KeyCode::Char(']'));
                 TreeAction::None
             }
             KeyCode::Char('[') => {
-                self.pending = Some(KeyCode::Char('['));
+                self.pending.push(KeyCode::Char('['));
                 TreeAction::None
             }
+            KeyCode::Char('m') => {
+                self.pending.push(KeyCode::Char('m'));
+                TreeAction::None
+            }
+            KeyCode::Char('\'') => {
+                self.pending.push(KeyCode::Char('\''));
+                TreeAction::None
+            }
+            KeyCode::Char('`') => {
+                self.pending.push(KeyCode::Char('`'));
+                TreeAction::None
+            }
+            KeyCode::Char('d') if !ctrl => {
+                self.pending.push(KeyCode::Char('d'));
+                TreeAction::None
+            }
+
+            KeyCode::Char('t') if ctrl => TreeAction::PopJump,
 
             // jump to first / last content item
             KeyCode::Char('g') => TreeAction::SelectFirst,
@@ -223,7 +284,7 @@ mod tests {
         let mut p = KeyParser::new();
         let action = p.process(press(KeyCode::Char('z')), 24);
         assert!(is_none(&action));
-        assert!(p.pending.is_some());
+        assert!(!p.pending.is_empty());
     }
 
     #[test]
@@ -234,7 +295,7 @@ mod tests {
             p.process(press(KeyCode::Char('t')), 24),
             TreeAction::ScrollSelectionToTop
         ));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     #[test]
@@ -245,7 +306,7 @@ mod tests {
             p.process(press(KeyCode::Char('z')), 24),
             TreeAction::ScrollSelectionToMiddle
         ));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     #[test]
@@ -256,7 +317,7 @@ mod tests {
             p.process(press(KeyCode::Char('b')), 24),
             TreeAction::ScrollSelectionToBottom
         ));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     #[test]
@@ -265,7 +326,7 @@ mod tests {
         p.process(press(KeyCode::Char('z')), 24);
         let action = p.process(press(KeyCode::Char('x')), 24);
         assert!(is_none(&action));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     #[test]
@@ -293,10 +354,10 @@ mod tests {
     fn non_press_events_return_none_and_clear_pending() {
         let mut p = KeyParser::new();
         p.process(press(KeyCode::Char('z')), 24);
-        assert!(p.pending.is_some());
+        assert!(!p.pending.is_empty());
         let action = p.process(release(KeyCode::Char('t')), 24);
         assert!(is_none(&action));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     // ── Ctrl-D / Ctrl-U ───────────────────────────────────────────────────────
@@ -352,7 +413,7 @@ mod tests {
             p.process(press(KeyCode::Char(']')), 24),
             TreeAction::SelectNextTurnStart
         ));
-        assert!(p.pending.is_none());
+        assert!(p.pending.is_empty());
     }
 
     #[test]
@@ -392,5 +453,79 @@ mod tests {
         assert!(is_none(&p.process(press(KeyCode::Char('x')), 24)));
         p.process(press(KeyCode::Char('[')), 24);
         assert!(is_none(&p.process(press(KeyCode::Char('x')), 24)));
+    }
+
+    // ── marks: m<char> / '<char> / `<char> / dm<char> ────────────────────────
+
+    #[test]
+    fn m_char_returns_set_mark() {
+        let mut p = KeyParser::new();
+        p.process(press(KeyCode::Char('m')), 24);
+        assert!(matches!(
+            p.process(press(KeyCode::Char('a')), 24),
+            TreeAction::SetMark('a')
+        ));
+        assert!(p.pending.is_empty());
+    }
+
+    #[test]
+    fn quote_char_returns_goto_mark() {
+        let mut p = KeyParser::new();
+        p.process(press(KeyCode::Char('\'')), 24);
+        assert!(matches!(
+            p.process(press(KeyCode::Char('b')), 24),
+            TreeAction::GotoMark('b')
+        ));
+    }
+
+    #[test]
+    fn backtick_char_returns_goto_mark() {
+        let mut p = KeyParser::new();
+        p.process(press(KeyCode::Char('`')), 24);
+        assert!(matches!(
+            p.process(press(KeyCode::Char('Z')), 24),
+            TreeAction::GotoMark('Z')
+        ));
+    }
+
+    #[test]
+    fn dm_char_returns_delete_mark() {
+        let mut p = KeyParser::new();
+        assert!(is_none(&p.process(press(KeyCode::Char('d')), 24)));
+        assert!(!p.pending.is_empty());
+        assert!(is_none(&p.process(press(KeyCode::Char('m')), 24)));
+        assert_eq!(p.pending.len(), 2);
+        assert!(matches!(
+            p.process(press(KeyCode::Char('a')), 24),
+            TreeAction::DeleteMark('a')
+        ));
+        assert!(p.pending.is_empty());
+    }
+
+    #[test]
+    fn d_then_unknown_drops() {
+        let mut p = KeyParser::new();
+        p.process(press(KeyCode::Char('d')), 24);
+        assert!(is_none(&p.process(press(KeyCode::Char('x')), 24)));
+        assert!(p.pending.is_empty());
+    }
+
+    #[test]
+    fn dm_then_non_alpha_drops() {
+        let mut p = KeyParser::new();
+        p.process(press(KeyCode::Char('d')), 24);
+        p.process(press(KeyCode::Char('m')), 24);
+        assert!(is_none(&p.process(press(KeyCode::Char('1')), 24)));
+        assert!(p.pending.is_empty());
+    }
+
+    #[test]
+    fn ctrl_d_does_not_enter_d_prefix() {
+        let mut p = KeyParser::new();
+        assert!(matches!(
+            p.process(ctrl('d'), 24),
+            TreeAction::ScrollDownHalf(_)
+        ));
+        assert!(p.pending.is_empty());
     }
 }

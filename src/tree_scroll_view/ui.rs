@@ -169,6 +169,7 @@ impl StatefulWidget for TreeScrollView<'_> {
                         palette: &theme.palette,
                         interaction: selected && message_interaction,
                         highlight,
+                        mark: state.marks.mark_for_id(&node.id),
                     }
                     .render(widget_area, buf);
 

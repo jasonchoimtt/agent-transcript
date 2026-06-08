@@ -26,6 +26,9 @@ pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
                 ("[[ / []", "Prev turn start / end"),
                 (") / (", "Next / prev message group start"),
                 ("} / {", "Next / prev user or agent message"),
+                ("m<char> / dm<char>", "Set / delete mark on current message"),
+                ("'<char> / `<char>", "Go to mark"),
+                ("Ctrl-T", "Pop jump list (return to previous position)"),
             ],
         ),
         (

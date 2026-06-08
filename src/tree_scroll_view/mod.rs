@@ -2,6 +2,7 @@ pub mod ansi;
 pub mod cursor;
 pub mod handler;
 pub mod markdown;
+pub mod marks;
 pub mod message_widget;
 pub mod predicates;
 pub mod sample;

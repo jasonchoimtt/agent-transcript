@@ -130,12 +130,13 @@ impl StatusBar<'_> {
         let right = right_pairs.map(|pairs| {
             let mut line = hints(&pairs, self.primary, self.muted, true);
             // Prepend pending-key indicator when a multi-key prefix is active.
-            let pending = self
+            let pending: Option<String> = self
                 .pending_app_key
-                .or_else(|| self.tree_state.key_parser.pending_char());
-            if let Some(c) = pending {
+                .map(|c| c.to_string())
+                .or_else(|| self.tree_state.key_parser.pending_prefix());
+            if let Some(prefix) = pending {
                 let style = Style::default().add_modifier(Modifier::DIM);
-                let mut spans = vec![Span::styled(format!(" {c}…  "), style)];
+                let mut spans = vec![Span::styled(format!(" {prefix}…  "), style)];
                 spans.extend(line.spans);
                 line = Line::from(spans);
             }

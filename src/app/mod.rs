@@ -200,6 +200,7 @@ impl App {
                 } else {
                     app.terminal.state = PanelState::Uninitialized(info);
                 }
+                app.load_marks();
                 app.transcript_open = true;
             }
             StartMode::NewSession { provider } => {
@@ -552,6 +553,7 @@ impl App {
             state: PanelState::Uninitialized(info),
             expanded: false,
         };
+        self.load_marks();
         self.mode = AppMode::Normal;
         self.transcript_open = true;
         self.screen = AppScreen::Transcript;
@@ -669,6 +671,33 @@ impl App {
         match provider {
             ProviderKind::Claude => &self.config.agents.claude,
             ProviderKind::Cursor => &self.config.agents.cursor,
+        }
+    }
+
+    fn current_marks_path(&self) -> Option<std::path::PathBuf> {
+        let info = self.terminal.session_info()?;
+        let sid = info.session_id.as_deref()?;
+        let provider_name = info.provider.to_string();
+        Some(crate::tree_scroll_view::marks::marks_path(
+            &provider_name,
+            sid,
+        ))
+    }
+
+    pub(super) fn save_marks(&self) {
+        if let Some(path) = self.current_marks_path()
+            && let Err(e) = self.tree_state.marks.save(&path)
+        {
+            tracing::warn!("failed to save marks: {e:#}");
+        }
+    }
+
+    fn load_marks(&mut self) {
+        if let Some(path) = self.current_marks_path() {
+            match crate::tree_scroll_view::marks::Marks::load(&path) {
+                Ok(marks) => self.tree_state.marks = marks,
+                Err(e) => tracing::warn!("failed to load marks: {e:#}"),
+            }
         }
     }
 

@@ -630,6 +630,8 @@ pub struct TreeScrollViewState {
     /// UI-flag snapshot taken at `Reset` time; cleared on `ResetDone`.
     /// Incoming nodes (Append/Replace) merge flags from this map before insertion.
     reset_snapshot: HashMap<String, NodeUiFlags>,
+    pub marks: super::marks::Marks,
+    pub jump_list: super::marks::JumpList,
 }
 
 fn make_terminal_node() -> MessageState {
@@ -687,6 +689,8 @@ impl TreeScrollViewState {
             search: None,
             pending_search: None,
             reset_snapshot: HashMap::new(),
+            marks: super::marks::Marks::new(),
+            jump_list: super::marks::JumpList::new(),
         };
         state.initialize_selection();
         state
@@ -2343,7 +2347,11 @@ impl TreeScrollViewState {
             | TreeAction::None
             | TreeAction::CopyMarkdown
             | TreeAction::CopyPlainText
-            | TreeAction::CopyRawData => {}
+            | TreeAction::CopyRawData
+            | TreeAction::SetMark(_)
+            | TreeAction::DeleteMark(_)
+            | TreeAction::GotoMark(_)
+            | TreeAction::PopJump => {}
         }
     }
 
@@ -2378,6 +2386,8 @@ impl TreeScrollViewState {
             search: None,
             pending_search: None,
             reset_snapshot: HashMap::new(),
+            marks: super::marks::Marks::new(),
+            jump_list: super::marks::JumpList::new(),
         };
         state.initialize_selection();
         state
