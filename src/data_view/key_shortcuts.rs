@@ -66,7 +66,7 @@ pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
             "Info & Debug",
             &[
                 ("Shift-I", "Open session info view"),
-                ("?", "Open this key shortcuts view"),
+                (":", "Open this key shortcuts view"),
                 ("!s", "Toggle debug info in status bar"),
                 ("!l", "Open reader log view"),
                 ("!L", "Enable debug file logging"),

@@ -6,7 +6,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::clipboard::markdown_to_plain;
 use crate::data_view::{
-    DataViewAction, DataViewState, build_reader_log_nodes, handle_key_event_dv,
+    DataViewAction, DataViewState, build_key_shortcuts_nodes, build_reader_log_nodes,
+    handle_key_event_dv,
 };
 use crate::picker::handler::PickerAction;
 use crate::providers::ProviderKind;
@@ -406,6 +407,9 @@ impl App {
                 backward: false,
             };
             self.active_tree_state_mut().search_pending("", false);
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char(':') {
+            // :: open key shortcuts view.
+            self.data_view = Some(DataViewState::from_nodes(build_key_shortcuts_nodes()));
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('?') {
             // ?: enter backward search; push jump so Ctrl-T returns here.
             self.tree_state.push_jump();
