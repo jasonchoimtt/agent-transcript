@@ -1348,6 +1348,98 @@ fn select_prev_user_agent_at_run_start_after_tool() {
 }
 
 // ── turn navigation ────────────────────────────────────────────────────────────
+//
+// run_start_tree: one turn whose agent sub-turn ends with three consecutive
+// AgentMessages, used to verify the same-type run-start retreat on `][` / `[]`.
+//
+//   [0] turn:rs  Container  group=true
+//     [0,0] user_sub  Container
+//       [0,0,0] user:rs   UserMessage
+//     [0,1] agent_sub  Container
+//       [0,1,0] agent:rs0  AgentMessage   ← run start (target)
+//       [0,1,1] agent:rs1  AgentMessage
+//       [0,1,2] agent:rs2  AgentMessage   ← DFS-last
+
+fn run_start_tree() -> TreeScrollViewState {
+    let turn = turn_group(
+        "turn:rs",
+        vec![
+            sub_turn(
+                "user_sub",
+                vec![
+                    MessageState::new("user:rs")
+                        .message_type(MessageType::UserMessage)
+                        .text("u"),
+                ],
+            ),
+            sub_turn(
+                "agent_sub",
+                vec![
+                    MessageState::new("agent:rs0")
+                        .message_type(MessageType::AgentMessage)
+                        .text("a0"),
+                    MessageState::new("agent:rs1")
+                        .message_type(MessageType::AgentMessage)
+                        .text("a1"),
+                    MessageState::new("agent:rs2")
+                        .message_type(MessageType::AgentMessage)
+                        .text("a2"),
+                ],
+            ),
+        ],
+    );
+    TreeScrollViewState::new(vec![turn])
+}
+
+// Three turns used to verify that mid-run selection triggers advance/retreat to the
+// neighbouring turn rather than landing on the run-start within the current turn.
+//
+//   [0] t:0  group  →  [0,0,0] user:t0   (UserMessage)
+//   [1] t:1  group  →  [1,0,0] agent:t1a, [1,0,1] agent:t1b, [1,0,2] agent:t1c (AgentMessage ×3)
+//   [2] t:2  group  →  [2,0,0] user:t2   (UserMessage)
+//   [3] terminal
+fn three_turn_mid_run_tree() -> TreeScrollViewState {
+    let turn0 = turn_group(
+        "t:0",
+        vec![sub_turn(
+            "u_sub:0",
+            vec![
+                MessageState::new("user:t0")
+                    .message_type(MessageType::UserMessage)
+                    .text("u0"),
+            ],
+        )],
+    );
+    let turn1 = turn_group(
+        "t:1",
+        vec![sub_turn(
+            "a_sub:1",
+            vec![
+                MessageState::new("agent:t1a")
+                    .message_type(MessageType::AgentMessage)
+                    .text("a0"),
+                MessageState::new("agent:t1b")
+                    .message_type(MessageType::AgentMessage)
+                    .text("a1"),
+                MessageState::new("agent:t1c")
+                    .message_type(MessageType::AgentMessage)
+                    .text("a2"),
+            ],
+        )],
+    );
+    let turn2 = turn_group(
+        "t:2",
+        vec![sub_turn(
+            "u_sub:2",
+            vec![
+                MessageState::new("user:t2")
+                    .message_type(MessageType::UserMessage)
+                    .text("u2"),
+            ],
+        )],
+    );
+    TreeScrollViewState::new(vec![turn0, turn1, turn2])
+}
 
 #[test]
 fn select_next_turn_start_reaches_first_message_of_next_turn() {
@@ -1359,46 +1451,108 @@ fn select_next_turn_start_reaches_first_message_of_next_turn() {
 }
 
 #[test]
-fn select_next_turn_end_reaches_last_message_of_current_turn() {
+fn select_next_turn_end_reaches_run_start_of_current_turn_end() {
     let mut state = nav_tree();
     state.selection_index = vec![0, 0, 0]; // turn 0
 
-    state.select_next_turn_end(); // → result:0 (last non-Container in turn 0)
+    // DFS-last of turn 0 is result:0 at [0,1,2,0]; it has no same-type sibling,
+    // so the run start is itself.
+    state.select_next_turn_end();
     assert_eq!(sel(&state), vec![0, 1, 2, 0]);
+}
+
+#[test]
+fn select_next_turn_end_retreats_to_same_type_run_start() {
+    let mut state = run_start_tree();
+    state.selection_index = vec![0, 0, 0]; // user:rs
+
+    // DFS-last = agent:rs2 at [0,1,2]; retreats through agent:rs1 and agent:rs0
+    // (same AgentMessage type), landing on run start [0,1,0].
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![0, 1, 0]);
 }
 
 #[test]
 fn select_next_turn_end_advances_when_already_at_turn_end() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 2, 0]; // already at end of turn 0
+    state.selection_index = vec![0, 1, 2, 0]; // at run-start end of turn 0
 
-    state.select_next_turn_end(); // → agent:1 (last non-Container in turn 1)
+    state.select_next_turn_end(); // → agent:1 (run-start end of turn 1)
     assert_eq!(sel(&state), vec![1, 1, 1]);
 }
 
 #[test]
-fn select_prev_turn_start_reaches_first_message_of_prev_turn() {
+fn select_next_turn_end_advances_from_mid_run() {
+    let mut state = three_turn_mid_run_tree();
+    state.selection_index = vec![1, 0, 1]; // agent:t1b — past run start [1,0,0]
+
+    state.select_next_turn_end(); // → user:t2 (run-start end of turn 2)
+    assert_eq!(sel(&state), vec![2, 0, 0]);
+}
+
+#[test]
+fn select_prev_turn_start_reaches_current_turn_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 1, 1]; // turn 1
+    state.selection_index = vec![1, 1, 1]; // mid turn 1, not at its start
+
+    state.select_prev_turn_start(); // → user:1 (first non-Container in current turn 1)
+    assert_eq!(sel(&state), vec![1, 0, 0]);
+}
+
+#[test]
+fn select_prev_turn_start_retreats_to_prev_when_already_at_start() {
+    let mut state = nav_tree();
+    state.selection_index = vec![1, 0, 0]; // already at turn_start_path(1)
 
     state.select_prev_turn_start(); // → user:0 (first non-Container in turn 0)
     assert_eq!(sel(&state), vec![0, 0, 0]);
 }
 
 #[test]
-fn select_prev_turn_end_reaches_last_message_of_prev_turn() {
+fn select_prev_turn_end_reaches_current_turn_end() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 0, 0]; // turn 1
+    state.selection_index = vec![1, 0, 0]; // start of turn 1, not at its end
 
-    state.select_prev_turn_end(); // → result:0 (last non-Container in turn 0)
+    state.select_prev_turn_end(); // → agent:1 (run-start end of current turn 1)
+    assert_eq!(sel(&state), vec![1, 1, 1]);
+}
+
+#[test]
+fn select_prev_turn_end_retreats_to_prev_when_already_at_end() {
+    let mut state = nav_tree();
+    state.selection_index = vec![1, 1, 1]; // at run-start end of turn 1
+
+    state.select_prev_turn_end(); // → result:0 (run-start end of turn 0)
     assert_eq!(sel(&state), vec![0, 1, 2, 0]);
+}
+
+#[test]
+fn select_prev_turn_end_retreats_from_mid_run() {
+    let mut state = three_turn_mid_run_tree();
+    state.selection_index = vec![1, 0, 1]; // agent:t1b — past run start [1,0,0]
+
+    state.select_prev_turn_end(); // → user:t0 (run-start end of turn 0)
+    assert_eq!(sel(&state), vec![0, 0, 0]);
+}
+
+#[test]
+fn select_prev_turn_end_retreats_to_same_type_run_start() {
+    let mut state = run_start_tree();
+    // Wrap in a two-turn tree so there is a "prev" turn to jump back from.
+    // Simplest: use a second tree where we set up selection at run-start already
+    // and verify the run-start end of the single turn.
+    state.selection_index = vec![0, 0, 0]; // user:rs — not at end
+
+    state.select_prev_turn_end(); // → agent:rs0 (run start of trailing AgentMessage run)
+    assert_eq!(sel(&state), vec![0, 1, 0]);
 }
 
 #[test]
 fn turn_nav_clamps_at_boundaries() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // turn 0 — no prev turn
-
+    // [[ from the very first node of turn 0: already at turn_start_path(0),
+    // so the "if already there" branch fires; turn_idx == 0 → no-op.
+    state.selection_index = vec![0, 0, 0];
     state.select_prev_turn_start();
     assert_eq!(
         sel(&state),
@@ -1406,7 +1560,7 @@ fn turn_nav_clamps_at_boundaries() {
         "prev turn start clamps at first turn"
     );
 
-    // Last turn — no next turn
+    // ]] from the last turn — no next turn
     state.selection_index = vec![2, 1, 0];
     state.select_next_turn_start();
     assert_eq!(

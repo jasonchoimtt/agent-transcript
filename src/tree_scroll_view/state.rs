@@ -2002,38 +2002,69 @@ impl TreeScrollViewState {
         }
         let path = self.turn_start_path(next);
         self.set_selection(path);
+        self.top_index = self.selection_index.clone();
+        self.top_offset = 0;
     }
 
-    // ][ – last non-Container message in current turn; if already there, advance to next turn end
+    // ][ – last non-Container message in current turn; if already at or past the run start, advance to next turn end
     pub fn select_next_turn_end(&mut self) {
         let turn_idx = self.selection_index.first().copied().unwrap_or(0);
-        let end = self.turn_end_path(turn_idx);
-        if self.selection_index == end {
-            let next_end = self.turn_end_path(turn_idx + 1);
+        let end = self.turn_end_run_start_path(turn_idx);
+        if self.selection_index >= end {
+            let next_end = self.turn_end_run_start_path(turn_idx + 1);
             self.set_selection(next_end);
         } else {
             self.set_selection(end);
         }
+        self.top_index = self.selection_index.clone();
+        self.top_offset = 0;
     }
 
-    // [[ – first non-Container message in prev turn
+    // [[ – first non-Container message in current turn; if already there, retreat to previous turn first non-Container message
     pub fn select_prev_turn_start(&mut self) {
-        let turn_idx = self.selection_index.first().copied().unwrap_or(0);
-        if turn_idx == 0 {
-            return;
+        let raw = self.selection_index.first().copied().unwrap_or(0);
+        let turn_idx = if self.is_terminal_selected() {
+            raw.saturating_sub(1)
+        } else {
+            raw
+        };
+        let start = self.turn_start_path(turn_idx);
+        if self.selection_index == start {
+            if turn_idx == 0 {
+                return;
+            }
+            let prev_start = self.turn_start_path(turn_idx - 1);
+            self.set_selection(prev_start);
+        } else {
+            self.set_selection(start);
         }
-        let path = self.turn_start_path(turn_idx - 1);
-        self.set_selection(path);
+        self.top_index = self.selection_index.clone();
+        self.top_offset = 0;
     }
 
-    // [] – last non-Container message in prev turn
+    // [] – last non-Container message in current turn; if already at or past the run start, retreat to previous turn end
     pub fn select_prev_turn_end(&mut self) {
-        let turn_idx = self.selection_index.first().copied().unwrap_or(0);
-        if turn_idx == 0 {
-            return;
+        let raw = self.selection_index.first().copied().unwrap_or(0);
+        let is_terminal = self.is_terminal_selected();
+        let turn_idx = if is_terminal {
+            raw.saturating_sub(1)
+        } else {
+            raw
+        };
+        let end = self.turn_end_run_start_path(turn_idx);
+        // Guard against is_terminal: a terminal path like [n] is always lexicographically
+        // greater than any content path, so we must not treat it as "already past end".
+        if !is_terminal && self.selection_index >= end {
+            if turn_idx == 0 {
+                return;
+            }
+            let prev_end = self.turn_end_run_start_path(turn_idx - 1);
+            self.set_selection(prev_end);
+        } else {
+            self.set_selection(end);
         }
-        let path = self.turn_end_path(turn_idx - 1);
-        self.set_selection(path);
+        self.top_index = self.selection_index.clone();
+        self.top_offset = 0;
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -2198,6 +2229,45 @@ impl TreeScrollViewState {
                 p
             })
             .unwrap_or_else(|| vec![turn_idx])
+    }
+
+    /// Like `turn_end_path`, but retreats to the start of the same-type sibling
+    /// run at the found node's level (e.g. `[U,T,A,T,A,A,A]` → items[4]).
+    fn turn_end_run_start_path(&self, turn_idx: usize) -> Vec<usize> {
+        let end_path = self.turn_end_path(turn_idx);
+        if end_path.is_empty() {
+            return end_path;
+        }
+        let end_type = match get_node(&self.items, &end_path) {
+            Some(n) => n.message_type.clone(),
+            None => return end_path,
+        };
+        let parent_depth = end_path.len() - 1;
+        let last_idx = *end_path.last().unwrap();
+        let siblings: &[MessageState] = if parent_depth == 0 {
+            &self.items
+        } else {
+            match get_node(&self.items, &end_path[..parent_depth]) {
+                Some(n) => &n.children,
+                None => return end_path,
+            }
+        };
+        let mut run_start = last_idx;
+        while run_start > 0 {
+            let prev = &siblings[run_start - 1];
+            // Table nodes are treated as part of an AgentMessage run (workaround).
+            let in_run = is_nav_target(prev)
+                && (prev.message_type == end_type
+                    || (end_type == MessageType::AgentMessage
+                        && prev.message_type == MessageType::Table));
+            if !in_run {
+                break;
+            }
+            run_start -= 1;
+        }
+        let mut path = end_path[..parent_depth].to_vec();
+        path.push(run_start);
+        path
     }
 
     /// Apply a `TreeAction` to this state, handling all pure-tree actions.
