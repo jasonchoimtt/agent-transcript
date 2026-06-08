@@ -59,6 +59,10 @@ pub struct TerminalState {
     pub collapsed_crop_is_alt_screen: bool,
     /// Minimum height to report for a detected crop (0 = no minimum).
     pub crop_min_height: u16,
+    /// First PTY screen row of the prompt box, updated on every successful crop detection
+    /// and cleared to `None` on failure. Non-sticky — unlike `collapsed_crop`, this is not
+    /// retained when detection returns None, so the overlay disappears during UI transitions.
+    pub prompt_box_start_row: Option<u16>,
 
     /// Cursor row recorded at the last non-suppressed render.
     settled_cursor_row: Option<u16>,
@@ -158,6 +162,7 @@ impl TerminalState {
             collapsed_crop: None,
             collapsed_crop_is_alt_screen: false,
             crop_min_height: 0,
+            prompt_box_start_row: None,
             settled_cursor_row: None,
             suppress_render_deadline: None,
         })
@@ -395,21 +400,29 @@ impl TerminalState {
             self.collapsed_crop_is_alt_screen = screen.alternate_screen();
         }
 
-        if let Some(mut crop) = self.crop_detector.detect(screen) {
-            if self.crop_min_height > 0 && crop.height < self.crop_min_height {
-                let (rows, _) = screen.size();
-                let available = rows.saturating_sub(crop.start_row);
-                crop.height = self.crop_min_height.min(available);
-            }
-            match self.collapsed_crop {
-                None => debug!("initial crop: {:?}", crop),
-                Some(prev_crop) => {
-                    if prev_crop != crop {
-                        debug!("crop changed: {:?}", crop)
+        match self.crop_detector.detect(screen) {
+            Some(mut crop) => {
+                if self.crop_min_height > 0 && crop.height < self.crop_min_height {
+                    let (rows, _) = screen.size();
+                    let available = rows.saturating_sub(crop.start_row);
+                    crop.height = self.crop_min_height.min(available);
+                }
+                match self.collapsed_crop {
+                    None => debug!("initial crop: {:?}", crop),
+                    Some(prev_crop) => {
+                        if prev_crop != crop {
+                            debug!("crop changed: {:?}", crop)
+                        }
                     }
                 }
+                self.collapsed_crop = Some(crop);
+                self.prompt_box_start_row = Some(crop.prompt_start_row);
             }
-            self.collapsed_crop = Some(crop);
+            None => {
+                // collapsed_crop is kept (sticky) to avoid flicker.
+                // prompt_box_start_row is cleared so the overlay disappears during transitions.
+                self.prompt_box_start_row = None;
+            }
         }
     }
 }

@@ -114,6 +114,13 @@ pub struct App {
     pub(super) debug_writer: crate::logging::DebugHandle,
     /// Pending first key of an app-level composite sequence (e.g. `!`).
     pub(super) pending_app_key: Option<char>,
+    /// When true, the prompt box overlay is permanently pinned at the bottom of the viewport
+    /// even when the terminal does not have focus.
+    pub(super) prompt_pinned: bool,
+    /// Geometry of the prompt overlay set after each draw(), used for mouse translation.
+    /// `(area_x, prompt_rows_y, prompt_height, pty_prompt_start_row)`
+    /// `None` when no overlay is visible.
+    pub(super) prompt_overlay_render_info: Option<(u16, u16, u16, u16)>,
 }
 
 impl App {
@@ -151,6 +158,8 @@ impl App {
             clipboard_backend: None,
             debug_writer,
             pending_app_key: None,
+            prompt_pinned: false,
+            prompt_overlay_render_info: None,
         };
 
         match start_mode {
@@ -491,6 +500,35 @@ impl App {
     fn activate_terminal(&mut self) {
         self.tree_state.key_parser.reset();
         self.tree_state.select_terminal_node();
+        self.mode = AppMode::Terminal;
+        self.terminal.apply_cursor_shape();
+    }
+
+    /// Translate a mouse event into PTY coordinates for the prompt overlay.
+    /// Returns `None` if the event is outside the overlay area.
+    pub(super) fn translate_mouse_to_prompt_overlay(
+        &self,
+        ev: crossterm::event::MouseEvent,
+    ) -> Option<crossterm::event::MouseEvent> {
+        let (area_x, prompt_y, prompt_h, pty_start_row) = self.prompt_overlay_render_info?;
+        // Col 0 is the selection gutter; PTY content starts at area_x + 1.
+        let pty_col = ev.column.checked_sub(area_x + 1)?;
+        let pane_i = ev.row.checked_sub(prompt_y)?;
+        if pane_i >= prompt_h {
+            return None;
+        }
+        Some(crossterm::event::MouseEvent {
+            row: pty_start_row + pane_i,
+            column: pty_col,
+            ..ev
+        })
+    }
+
+    /// Activate the terminal in floating mode: give it keyboard focus without scrolling the
+    /// tree to the terminal node. Used when the scroll view is not at bottom, so the user
+    /// keeps their current position while the prompt box appears as an overlay.
+    fn activate_terminal_floating(&mut self) {
+        self.tree_state.key_parser.reset();
         self.mode = AppMode::Terminal;
         self.terminal.apply_cursor_shape();
     }

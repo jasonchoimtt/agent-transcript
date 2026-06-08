@@ -396,6 +396,9 @@ impl App {
             // r: open raw data view for selected message.
             let data = self.tree_state.selected_data().to_owned();
             self.data_view = Some(DataViewState::new(&data));
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('P') {
+            // Shift-P: toggle pinned prompt box.
+            self.prompt_pinned = !self.prompt_pinned;
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('I') {
             // Shift-I: open session info view.
             self.open_session_info();
@@ -489,9 +492,12 @@ impl App {
             TreeAction::TerminalActivate => {
                 if self.terminal.is_live() {
                     if !self.tree_state.at_bottom {
+                        // Scrolled away from bottom — activate in floating overlay mode.
                         self.tree_state.push_jump();
+                        self.activate_terminal_floating();
+                    } else {
+                        self.activate_terminal();
                     }
-                    self.activate_terminal();
                 }
             }
             TreeAction::CopyMarkdown => {

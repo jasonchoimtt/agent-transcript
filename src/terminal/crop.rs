@@ -6,6 +6,10 @@ pub struct CollapsedCrop {
     pub start_row: u16,
     /// Number of rows to display.
     pub height: u16,
+    /// First screen row of the prompt box itself (>= start_row).
+    /// Rows start_row..prompt_start_row are content above the prompt (e.g. queued messages,
+    /// running-command output). Used to position the floating/pinned overlay.
+    pub prompt_start_row: u16,
 }
 
 pub trait CropDetector: Send + Sync {
@@ -81,8 +85,8 @@ impl CropDetector for ClaudeCropDetector {
         let top_divider = tokenizer.take_until(LineMatcher::Divider);
 
         match top_divider {
-            // Prompt box found
-            Some(_) => {
+            // Prompt box found between two dividers.
+            Some(top_div_row) => {
                 // Queued messages
                 while tokenizer.take(LineMatcher::NonBlank).is_some() {}
 
@@ -122,11 +126,16 @@ impl CropDetector for ClaudeCropDetector {
                 Some(CollapsedCrop {
                     start_row: tokenizer.pos(),
                     height: end_row.saturating_sub(tokenizer.pos()) + 1,
+                    // Prompt box starts at the upper divider; content above it
+                    // (queued messages, running command) is above-prompt content.
+                    prompt_start_row: top_div_row,
                 })
             }
             None => Some(CollapsedCrop {
                 start_row: bottom_divider,
                 height: rows - bottom_divider,
+                // Single divider only — skip the divider row itself.
+                prompt_start_row: bottom_divider + 1,
             }),
         }
     }
@@ -149,6 +158,7 @@ fn find_cursor_divider_crop(screen: &vt100::Screen) -> Option<CollapsedCrop> {
         return Some(CollapsedCrop {
             start_row: top_divider,
             height: tokenizer.rows().saturating_sub(top_divider),
+            prompt_start_row: top_divider,
         });
     }
 
@@ -156,6 +166,7 @@ fn find_cursor_divider_crop(screen: &vt100::Screen) -> Option<CollapsedCrop> {
     bottommost_divider.map(|bottom_divider| CollapsedCrop {
         start_row: bottom_divider,
         height: tokenizer.rows().saturating_sub(bottom_divider),
+        prompt_start_row: bottom_divider,
     })
 }
 
@@ -195,9 +206,12 @@ impl CropDetector for CursorCropDetector {
                 tokenizer.seek(box_start);
             }
 
+            let start = tokenizer.pos();
             return Some(CollapsedCrop {
-                start_row: tokenizer.pos(),
-                height: end_row.saturating_sub(tokenizer.pos()) + 1,
+                start_row: start,
+                height: end_row.saturating_sub(start) + 1,
+                // The entire detected region is prompt UI (braille + upper box + main box).
+                prompt_start_row: start,
             });
         }
 
@@ -278,6 +292,8 @@ mod tests {
         let crop = result.unwrap();
         assert_eq!(crop.start_row, 18);
         assert_eq!(crop.height, 2);
+        // Single divider → prompt starts after the divider row.
+        assert_eq!(crop.prompt_start_row, 19);
     }
 
     // ── Claude command-output exclusion ──────────────────────────────────────
@@ -300,6 +316,8 @@ mod tests {
             crop.start_row, 4,
             "command output paragraph should be excluded"
         );
+        // start_row == top divider (row 4) when content above is excluded.
+        assert_eq!(crop.prompt_start_row, 4);
     }
 
     #[test]
@@ -318,6 +336,11 @@ mod tests {
         assert_eq!(
             crop.start_row, 0,
             "non-command paragraph should be included"
+        );
+        // top divider is at row 4 (`\x1b[5;1H` = 1-based row 5 = 0-based row 4).
+        assert_eq!(
+            crop.prompt_start_row, 4,
+            "prompt starts at top divider, not paragraph"
         );
     }
 
@@ -389,6 +412,9 @@ mod tests {
             .expect("claude/running-command.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 9);
         assert_eq!(crop.height, 8);
+        // Running command paragraph is included (start_row=9), but the prompt box itself
+        // starts at the top divider (row 12) — same row as ran-command's start_row.
+        assert_eq!(crop.prompt_start_row, 12);
     }
 
     #[test]
@@ -401,6 +427,8 @@ mod tests {
             .expect("claude/ran-command.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 12);
         assert_eq!(crop.height, 5);
+        // Paragraph excluded → start_row == top divider == prompt_start_row.
+        assert_eq!(crop.prompt_start_row, 12);
     }
 
     #[test]
@@ -429,6 +457,7 @@ mod tests {
             .expect("cursor/working.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 10);
         assert_eq!(crop.height, 4);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -443,6 +472,7 @@ mod tests {
             .expect("cursor/user_pending.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 5);
         assert_eq!(crop.height, 11);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -455,6 +485,7 @@ mod tests {
             .expect("cursor/approval.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 14);
         assert_eq!(crop.height, 6);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -466,6 +497,7 @@ mod tests {
             .expect("cursor/idle-dark.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 9);
         assert_eq!(crop.height, 5);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -477,6 +509,7 @@ mod tests {
             .expect("cursor/idle.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 8);
         assert_eq!(crop.height, 5);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -488,6 +521,7 @@ mod tests {
             .expect("cursor/running-command.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 6);
         assert_eq!(crop.height, 5);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -500,6 +534,7 @@ mod tests {
             .expect("cursor/resume.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 0);
         assert_eq!(crop.height, 46);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     #[test]
@@ -512,6 +547,7 @@ mod tests {
             .expect("cursor/rewind.txt should produce Some(crop)");
         assert_eq!(crop.start_row, 24);
         assert_eq!(crop.height, 11);
+        assert_eq!(crop.prompt_start_row, crop.start_row);
     }
 
     // ── Cursor synthetic tests ────────────────────────────────────────────────
@@ -622,6 +658,7 @@ mod tests {
         let initial = CollapsedCrop {
             start_row: 5,
             height: 12,
+            prompt_start_row: 5,
         };
         let detector = Box::new(ToggleDetector {
             call_count: std::sync::atomic::AtomicU32::new(0),
@@ -631,16 +668,26 @@ mod tests {
             TerminalState::new_with_cmd(CommandBuilder::new("/bin/sh"), None, detector, tx, 0)
                 .expect("failed to spawn PTY");
 
-        // First call: detector returns Some → value is set.
+        // First call: detector returns Some → both values set.
         state.recompute_crop();
         assert_eq!(state.collapsed_crop, Some(initial));
+        assert_eq!(
+            state.prompt_box_start_row,
+            Some(initial.prompt_start_row),
+            "prompt_box_start_row should be set on successful detection"
+        );
 
-        // Second call: detector returns None → previous value is retained.
+        // Second call: detector returns None → collapsed_crop retained (sticky),
+        // but prompt_box_start_row cleared (non-sticky).
         state.recompute_crop();
         assert_eq!(
             state.collapsed_crop,
             Some(initial),
             "collapsed_crop should be retained when detection returns None"
+        );
+        assert_eq!(
+            state.prompt_box_start_row, None,
+            "prompt_box_start_row should be cleared when detection returns None"
         );
     }
 }

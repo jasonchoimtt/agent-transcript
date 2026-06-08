@@ -61,6 +61,9 @@ impl App {
             MouseEventKind::Moved => {
                 if self.mode == AppMode::Terminal && self.is_over_terminal(ev.column, ev.row) {
                     self.forward_mouse_to_pty(ev);
+                } else if self.is_over_prompt_overlay(ev.column, ev.row) {
+                    // Overlay covers tree content — don't trigger hover on hidden messages.
+                    self.tree_state.hover = None;
                 } else {
                     let in_dv = self
                         .data_view
@@ -88,6 +91,11 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.mode == AppMode::Terminal && self.is_over_terminal(ev.column, ev.row) {
                     self.forward_mouse_to_pty(ev);
+                } else if self.is_over_prompt_overlay(ev.column, ev.row) {
+                    // Clicking the overlay activates the terminal in floating mode.
+                    if self.terminal.is_live() {
+                        self.activate_terminal_floating();
+                    }
                 } else {
                     // Clicking outside the terminal exits terminal mode so that a
                     // subsequent click on the terminal pane activates rather than forwards.
@@ -200,15 +208,30 @@ impl App {
     }
 
     fn is_over_terminal(&self, col: u16, row: u16) -> bool {
-        let Some((tx, ty, th, _)) = self.tree_state.terminal_render_info else {
+        if let Some((tx, ty, th, _)) = self.tree_state.terminal_render_info {
+            if col >= tx && col < tx + self.tree_state.viewport_width && row >= ty && row < ty + th
+            {
+                return true;
+            }
+        }
+        self.is_over_prompt_overlay(col, row)
+    }
+
+    fn is_over_prompt_overlay(&self, col: u16, row: u16) -> bool {
+        let Some((area_x, prompt_y, prompt_h, _)) = self.prompt_overlay_render_info else {
             return false;
         };
-        col >= tx && col < tx + self.tree_state.viewport_width && row >= ty && row < ty + th
+        col > area_x && row >= prompt_y && row < prompt_y + prompt_h
     }
 
     /// Forward a mouse event to the PTY if it is in a mouse-tracking mode.
     fn forward_mouse_to_pty(&mut self, ev: MouseEvent) {
-        let translated = self.tree_state.translate_mouse_to_pty(ev);
+        // Overlay translation takes priority: when the overlay is active it visually covers
+        // the bottom rows of the inline terminal, so those coordinates must map to prompt
+        // rows rather than through the inline terminal's scrollback offset.
+        let translated = self
+            .translate_mouse_to_prompt_overlay(ev)
+            .or_else(|| self.tree_state.translate_mouse_to_pty(ev));
         if let Some(term) = self.terminal.live_ts()
             && term.mouse_mode != MouseMode::Off
             && let Some(translated) = translated

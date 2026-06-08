@@ -28,6 +28,8 @@ pub struct StatusBar<'a> {
     pub collapsed_crop: Option<CollapsedCrop>,
     /// Pending first key of an app-level composite sequence (e.g. `!`).
     pub pending_app_key: Option<char>,
+    /// When true, show a `P` pinned indicator in the hint bar.
+    pub prompt_pinned: bool,
     /// Theme primary color, used for key-name highlights and confirm prompt bg.
     pub primary: Color,
     /// Theme muted color, used for hint text and status backgrounds.
@@ -137,6 +139,15 @@ impl StatusBar<'_> {
             if let Some(prefix) = pending {
                 let style = Style::default().add_modifier(Modifier::DIM);
                 let mut spans = vec![Span::styled(format!(" {prefix}…  "), style)];
+                spans.extend(line.spans);
+                line = Line::from(spans);
+            }
+            // Prepend pinned-prompt indicator when prompt is pinned.
+            if self.prompt_pinned {
+                let style = Style::default()
+                    .fg(self.primary)
+                    .add_modifier(Modifier::DIM);
+                let mut spans = vec![Span::styled(" [P] ".to_string(), style)];
                 spans.extend(line.spans);
                 line = Line::from(spans);
             }

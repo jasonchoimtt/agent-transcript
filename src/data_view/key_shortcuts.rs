@@ -10,6 +10,7 @@ pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
                 ("Ctrl-X", "Open session picker"),
                 ("Ctrl-K", "Kill session"),
                 ("Ctrl-M", "Send Ctrl-O to terminal"),
+                ("Shift-P", "Toggle pinned prompt box"),
             ],
         ),
         (
