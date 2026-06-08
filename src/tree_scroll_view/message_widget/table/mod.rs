@@ -2,10 +2,13 @@ mod handler;
 pub mod render;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::super::markdown::render_markdown;
-use super::super::state::{
-    ComponentKeyResult, MessageComponent, MessageState, UiState, measure_text_height,
+use super::super::state::{MessageState, measure_text_height};
+use super::component::{
+    ComponentKeyResult, ComponentState, ContentRenderContext, MessageComponent,
 };
 use crate::clipboard::markdown_to_plain;
 use crate::theme::Palette;
@@ -24,7 +27,7 @@ pub struct TableData {
 /// mutable interaction/layout state. `col_widths` is lazily initialized on
 /// first render; until then it is empty.
 #[derive(Debug, Clone)]
-pub struct TableUiState {
+pub struct TableState {
     pub data: TableData,
     /// None = header row selected; Some(r) = data row r (0-indexed).
     pub selected_row: Option<usize>,
@@ -41,7 +44,7 @@ pub struct TableUiState {
     pending_y: bool,
 }
 
-impl TableUiState {
+impl TableState {
     pub fn new(data: TableData) -> Self {
         Self {
             data,
@@ -169,8 +172,8 @@ impl TableUiState {
     }
 }
 
-impl UiState for TableUiState {
-    fn clone_box(&self) -> Box<dyn UiState> {
+impl ComponentState for TableState {
+    fn clone_box(&self) -> Box<dyn ComponentState> {
         Box::new(self.clone())
     }
 
@@ -186,17 +189,19 @@ impl UiState for TableUiState {
         std::any::type_name::<Self>()
     }
 
-    fn on_update(&self, new_message: &MessageState) -> Option<Box<dyn UiState>> {
+    fn on_update(
+        &self,
+        new_message: &super::super::state::MessageState,
+    ) -> Option<Box<dyn ComponentState>> {
         let new_ts = new_message
             .ui_state
             .as_ref()?
             .as_any()
-            .downcast_ref::<TableUiState>()?;
+            .downcast_ref::<TableState>()?;
         if new_ts.data.headers.len() != self.data.headers.len() {
-            // Column structure changed — reset layout state.
-            return None;
+            return Some(Box::new(TableState::new(new_ts.data.clone())));
         }
-        Some(Box::new(TableUiState {
+        Some(Box::new(TableState {
             data: new_ts.data.clone(),
             col_widths: self.col_widths.clone(),
             selected_col: self
@@ -210,99 +215,145 @@ impl UiState for TableUiState {
         }))
     }
 
-    fn as_component(&self) -> Option<&dyn MessageComponent> {
-        Some(self)
-    }
-
-    fn as_component_mut(&mut self) -> Option<&mut dyn MessageComponent> {
-        Some(self)
+    fn supports_interaction(&self) -> bool {
+        true
     }
 }
 
-impl MessageComponent for TableUiState {
-    fn supports_interaction(&self) -> bool {
-        true
+// ── TableComponent ────────────────────────────────────────────────────────────
+
+pub struct TableComponent<'a> {
+    pub message: &'a mut MessageState,
+}
+
+impl<'a> TableComponent<'a> {
+    fn state(&self) -> &TableState {
+        self.message
+            .ui_state
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TableState>()
+            .unwrap()
+    }
+
+    fn state_mut(&mut self) -> &mut TableState {
+        self.message
+            .ui_state
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<TableState>()
+            .unwrap()
+    }
+}
+
+impl<'a> MessageComponent for TableComponent<'a> {
+    fn message_mut(&mut self) -> &mut MessageState {
+        self.message
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> ComponentKeyResult {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let ts = self.state_mut();
 
-        // Resolve pending y-prefix first.
-        if self.pending_y {
-            self.pending_y = false;
+        if ts.pending_y {
+            ts.pending_y = false;
             return match key.code {
                 KeyCode::Char('y') => ComponentKeyResult::Copy {
-                    content: self.selected_cell_text(),
+                    content: ts.selected_cell_text(),
                 },
                 KeyCode::Char('t') => ComponentKeyResult::Copy {
-                    content: markdown_to_plain(&self.selected_cell_text()),
+                    content: markdown_to_plain(&ts.selected_cell_text()),
                 },
                 _ => ComponentKeyResult::Unhandled,
             };
         }
 
-        // Lifecycle and scroll keys are handled here; table-navigation keys delegate to handler.
         match key.code {
             KeyCode::Esc => ComponentKeyResult::ExitInteraction,
             KeyCode::Char('c') if ctrl => ComponentKeyResult::ExitInteraction,
             KeyCode::Char('n') | KeyCode::Char('p') if ctrl => ComponentKeyResult::Passthrough,
             KeyCode::Char('d') | KeyCode::Char('u') if ctrl => ComponentKeyResult::Passthrough,
             KeyCode::PageDown | KeyCode::PageUp => ComponentKeyResult::Passthrough,
-            // Y: immediate copy markdown of selected cell
             KeyCode::Char('Y') => ComponentKeyResult::Copy {
-                content: self.selected_cell_text(),
+                content: ts.selected_cell_text(),
             },
-            // y prefix: wait for second key (yy/yt)
             KeyCode::Char('y') => {
-                self.pending_y = true;
+                ts.pending_y = true;
                 ComponentKeyResult::Consumed {
                     invalidates_height: false,
                 }
             }
-            _ => match handler::handle_table_key(key, self.selected_col) {
-                Some(handler::TableAction::MoveSelection {
-                    row_delta,
-                    col_delta,
-                }) => {
-                    self.apply_move(row_delta, col_delta);
-                    ComponentKeyResult::Consumed {
-                        invalidates_height: false,
+            _ => {
+                let sel_col = ts.selected_col;
+                match handler::handle_table_key(key, sel_col) {
+                    Some(handler::TableAction::MoveSelection {
+                        row_delta,
+                        col_delta,
+                    }) => {
+                        ts.apply_move(row_delta, col_delta);
+                        ComponentKeyResult::Consumed {
+                            invalidates_height: false,
+                        }
                     }
-                }
-                Some(handler::TableAction::ResizeCol { col, delta }) => {
-                    self.apply_resize(col, delta);
-                    ComponentKeyResult::Consumed {
-                        invalidates_height: true,
+                    Some(handler::TableAction::ResizeCol { col, delta }) => {
+                        ts.apply_resize(col, delta);
+                        ComponentKeyResult::Consumed {
+                            invalidates_height: true,
+                        }
                     }
-                }
-                Some(handler::TableAction::ResetLayout) => {
-                    self.col_widths.clear();
-                    self.user_resized = false;
-                    ComponentKeyResult::Consumed {
-                        invalidates_height: true,
+                    Some(handler::TableAction::ResetLayout) => {
+                        ts.col_widths.clear();
+                        ts.user_resized = false;
+                        ComponentKeyResult::Consumed {
+                            invalidates_height: true,
+                        }
                     }
+                    None => ComponentKeyResult::Unhandled,
                 }
-                None => ComponentKeyResult::Unhandled,
-            },
+            }
         }
     }
 
     fn focused_line_range(&self, palette: &Palette) -> Option<(u16, u16)> {
-        self.selected_row_line_range(palette)
+        self.state().selected_row_line_range(palette)
     }
 
     fn on_viewport_width_changed(&mut self) {
-        if !self.user_resized {
-            self.col_widths.clear();
+        let ts = self.state_mut();
+        if !ts.user_resized {
+            ts.col_widths.clear();
         }
     }
 
     fn layout_pass(&mut self, available_width: u16, palette: &Palette) -> Option<u16> {
-        if self.col_widths.is_empty() {
-            self.col_widths = compute_col_widths(&self.data, available_width, palette);
+        let ts = self.state_mut();
+        if ts.col_widths.is_empty() {
+            ts.col_widths = compute_col_widths(&ts.data, available_width, palette);
         }
-        self.viewport_width = available_width;
-        Some(compute_table_height(self, palette))
+        ts.viewport_width = available_width;
+        Some(compute_table_height(ts, palette))
+    }
+
+    fn render_content(&self, area: Rect, buf: &mut Buffer, ctx: &ContentRenderContext<'_>) {
+        use crate::theme::styles::MessageStyle;
+        use ratatui::text::{Line, Span};
+        let MessageStyle::Table(table_style) = ctx.style else {
+            return;
+        };
+        if self.message.show_more {
+            let ts = self.state();
+            render::render_table(area, ts, table_style, buf, ctx);
+        } else {
+            let source = self.message.brief.as_deref().unwrap_or("Table");
+            let (clipped, truncated) = super::brief::clip_brief(source, area.width as usize);
+            let line = Line::from(Span::styled(
+                clipped,
+                table_style.cell.to_style(ctx.palette),
+            ));
+            super::brief::render_brief_line(area, buf, line, truncated, false, ctx.skip_lines);
+        }
     }
 }
 
@@ -381,7 +432,7 @@ pub fn row_render_height(cells: &[String], col_widths: &[u16], palette: &Palette
 }
 
 /// Total rendered height of the table grid including all borders and padding row.
-pub fn compute_table_height(state: &TableUiState, palette: &Palette) -> u16 {
+pub fn compute_table_height(state: &TableState, palette: &Palette) -> u16 {
     if state.col_widths.is_empty() {
         return 3; // placeholder: top border + 1 row + bottom border
     }
@@ -407,15 +458,35 @@ mod tests {
 
     use super::*;
     use crate::theme::Theme;
+    use crate::tree_scroll_view::state::MessageState;
 
-    fn make_state() -> TableUiState {
-        TableUiState::new(TableData {
+    fn make_message() -> MessageState {
+        let ts = TableState::new(TableData {
             headers: vec!["A".into(), "B".into()],
             rows: vec![
                 vec!["a1".into(), "b1".into()],
                 vec!["a2".into(), "b2".into()],
             ],
-        })
+        });
+        MessageState::new("test").ui_state(Box::new(ts))
+    }
+
+    fn state(msg: &MessageState) -> &TableState {
+        msg.ui_state
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TableState>()
+            .unwrap()
+    }
+
+    fn state_mut(msg: &mut MessageState) -> &mut TableState {
+        msg.ui_state
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<TableState>()
+            .unwrap()
     }
 
     // crossterm's KeyEvent::new defaults to KeyEventKind::Press.
@@ -444,95 +515,95 @@ mod tests {
 
     #[test]
     fn handle_key_row_down_consumed_no_height_change() {
-        let mut ts = make_state();
-        let r = ts.handle_key(press(KeyCode::Down));
+        let mut msg = make_message();
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Down));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_row, Some(0));
+        assert_eq!(state(&msg).selected_row, Some(0));
     }
 
     #[test]
     fn handle_key_row_up_consumed_no_height_change() {
-        let mut ts = make_state();
-        ts.selected_row = Some(1);
-        let r = ts.handle_key(press(KeyCode::Up));
+        let mut msg = make_message();
+        state_mut(&mut msg).selected_row = Some(1);
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Up));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_row, Some(0));
+        assert_eq!(state(&msg).selected_row, Some(0));
     }
 
     #[test]
     fn handle_key_col_right_consumed_no_height_change() {
-        let mut ts = make_state();
-        let r = ts.handle_key(press(KeyCode::Right));
+        let mut msg = make_message();
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Right));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_col, 1);
+        assert_eq!(state(&msg).selected_col, 1);
     }
 
     #[test]
     fn handle_key_col_left_at_boundary_consumed_no_height_change() {
-        let mut ts = make_state();
-        let r = ts.handle_key(press(KeyCode::Left));
+        let mut msg = make_message();
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Left));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_col, 0); // clamped
+        assert_eq!(state(&msg).selected_col, 0); // clamped
     }
 
     #[test]
     fn handle_key_vim_hjkl_navigation() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press(KeyCode::Char('j'))),
+            TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('j'))),
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_row, Some(0));
+        assert_eq!(state(&msg).selected_row, Some(0));
         assert!(matches!(
-            ts.handle_key(press(KeyCode::Char('l'))),
+            TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('l'))),
             ComponentKeyResult::Consumed {
                 invalidates_height: false
             }
         ));
-        assert_eq!(ts.selected_col, 1);
+        assert_eq!(state(&msg).selected_col, 1);
     }
 
     #[test]
     fn handle_key_resize_plus_invalidates_height() {
-        let mut ts = make_state();
-        ts.col_widths = vec![10, 10];
-        let r = ts.handle_key(press(KeyCode::Char('+')));
+        let mut msg = make_message();
+        state_mut(&mut msg).col_widths = vec![10, 10];
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('+')));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: true
             }
         ));
-        assert!(ts.user_resized);
+        assert!(state(&msg).user_resized);
     }
 
     #[test]
     fn handle_key_resize_minus_invalidates_height() {
-        let mut ts = make_state();
-        ts.col_widths = vec![20, 20];
-        let r = ts.handle_key(press(KeyCode::Char('-')));
+        let mut msg = make_message();
+        state_mut(&mut msg).col_widths = vec![20, 20];
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('-')));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
@@ -543,24 +614,24 @@ mod tests {
 
     #[test]
     fn handle_key_reset_layout_invalidates_height() {
-        let mut ts = make_state();
-        ts.col_widths = vec![10, 10];
-        ts.user_resized = true;
-        let r = ts.handle_key(press(KeyCode::Char('0')));
+        let mut msg = make_message();
+        state_mut(&mut msg).col_widths = vec![10, 10];
+        state_mut(&mut msg).user_resized = true;
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('0')));
         assert!(matches!(
             r,
             ComponentKeyResult::Consumed {
                 invalidates_height: true
             }
         ));
-        assert!(ts.col_widths.is_empty());
-        assert!(!ts.user_resized);
+        assert!(state(&msg).col_widths.is_empty());
+        assert!(!state(&msg).user_resized);
     }
 
     #[test]
     fn handle_key_unrecognised_returns_unhandled() {
-        let mut ts = make_state();
-        let r = ts.handle_key(press(KeyCode::Char('x')));
+        let mut msg = make_message();
+        let r = TableComponent { message: &mut msg }.handle_key(press(KeyCode::Char('x')));
         assert!(matches!(r, ComponentKeyResult::Unhandled));
     }
 
@@ -568,54 +639,54 @@ mod tests {
 
     #[test]
     fn handle_key_esc_exits_interaction() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press(KeyCode::Esc)),
+            TableComponent { message: &mut msg }.handle_key(press(KeyCode::Esc)),
             ComponentKeyResult::ExitInteraction
         ));
     }
 
     #[test]
     fn handle_key_ctrl_c_exits_interaction() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press_ctrl(KeyCode::Char('c'))),
+            TableComponent { message: &mut msg }.handle_key(press_ctrl(KeyCode::Char('c'))),
             ComponentKeyResult::ExitInteraction
         ));
     }
 
     #[test]
     fn handle_key_ctrl_n_passthrough() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press_ctrl(KeyCode::Char('n'))),
+            TableComponent { message: &mut msg }.handle_key(press_ctrl(KeyCode::Char('n'))),
             ComponentKeyResult::Passthrough
         ));
     }
 
     #[test]
     fn handle_key_ctrl_p_passthrough() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press_ctrl(KeyCode::Char('p'))),
+            TableComponent { message: &mut msg }.handle_key(press_ctrl(KeyCode::Char('p'))),
             ComponentKeyResult::Passthrough
         ));
     }
 
     #[test]
     fn handle_key_page_down_passthrough() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press(KeyCode::PageDown)),
+            TableComponent { message: &mut msg }.handle_key(press(KeyCode::PageDown)),
             ComponentKeyResult::Passthrough
         ));
     }
 
     #[test]
     fn handle_key_page_up_passthrough() {
-        let mut ts = make_state();
+        let mut msg = make_message();
         assert!(matches!(
-            ts.handle_key(press(KeyCode::PageUp)),
+            TableComponent { message: &mut msg }.handle_key(press(KeyCode::PageUp)),
             ComponentKeyResult::Passthrough
         ));
     }
@@ -624,19 +695,19 @@ mod tests {
 
     #[test]
     fn on_viewport_width_changed_clears_when_not_user_resized() {
-        let mut ts = make_state();
-        ts.col_widths = vec![10, 20];
-        ts.user_resized = false;
-        ts.on_viewport_width_changed();
-        assert!(ts.col_widths.is_empty());
+        let mut msg = make_message();
+        state_mut(&mut msg).col_widths = vec![10, 20];
+        state_mut(&mut msg).user_resized = false;
+        TableComponent { message: &mut msg }.on_viewport_width_changed();
+        assert!(state(&msg).col_widths.is_empty());
     }
 
     #[test]
     fn on_viewport_width_changed_preserves_when_user_resized() {
-        let mut ts = make_state();
-        ts.col_widths = vec![10, 20];
-        ts.user_resized = true;
-        ts.on_viewport_width_changed();
-        assert_eq!(ts.col_widths, vec![10, 20]);
+        let mut msg = make_message();
+        state_mut(&mut msg).col_widths = vec![10, 20];
+        state_mut(&mut msg).user_resized = true;
+        TableComponent { message: &mut msg }.on_viewport_width_changed();
+        assert_eq!(state(&msg).col_widths, vec![10, 20]);
     }
 }

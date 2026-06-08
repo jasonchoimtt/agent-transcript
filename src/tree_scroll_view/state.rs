@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 
 use ansi_to_tui::IntoText;
@@ -10,11 +9,12 @@ use super::ansi::visual_width;
 use super::cursor::TreeCursor;
 use super::handler::{KeyParser, TreeAction};
 use super::markdown::render_markdown;
+use super::message_widget::get_message_component;
 use super::predicates::nonzero_height;
 use crate::reader_op::ReaderOp;
-use crate::theme::Palette;
 use crate::theme::Theme;
 use crate::tree_operation::TreeOperation;
+use crate::tree_scroll_view::message_widget::component::{ComponentKeyResult, ComponentState};
 
 pub use super::search::{PendingSearch, SearchHighlight, SearchState, highlight_text_spans};
 
@@ -34,89 +34,6 @@ impl HiddenState {
     /// Returns `true` only for the `Hidden` variant (not `Revealed`).
     pub fn is_hidden(self) -> bool {
         self == HiddenState::Hidden
-    }
-}
-
-// ── UiState ───────────────────────────────────────────────────────────────────
-
-/// Trait for rich per-node widget state (e.g. `TableUiState`).
-///
-/// Stored in `MessageState::ui_state`; accessed via downcast. The `on_update`
-/// hook is called during `Replace` so interaction state can survive streaming
-/// updates instead of being reset on every replace.
-pub trait UiState: Send + 'static {
-    fn clone_box(&self) -> Box<dyn UiState>;
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn type_name(&self) -> &'static str;
-    /// Called when the node this state belongs to is replaced. Return the state
-    /// to install on the updated node, or `None` to discard (default).
-    fn on_update(&self, _new_message: &MessageState) -> Option<Box<dyn UiState>> {
-        None
-    }
-    fn as_component(&self) -> Option<&dyn MessageComponent> {
-        None
-    }
-    fn as_component_mut(&mut self) -> Option<&mut dyn MessageComponent> {
-        None
-    }
-}
-
-impl Clone for Box<dyn UiState> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
-// ── MessageComponent ──────────────────────────────────────────────────────────
-
-/// Result returned by [`MessageComponent::handle_key`].
-pub enum ComponentKeyResult {
-    /// Key consumed; height may need recomputation.
-    Consumed { invalidates_height: bool },
-    /// Key signals exit from interaction mode.
-    ExitInteraction,
-    /// Key should be passed to the outer scroll view (e.g. Ctrl-N/P).
-    Passthrough,
-    /// Key not recognised by this component.
-    Unhandled,
-    /// Component wants to copy `content` to the clipboard.
-    Copy { content: String },
-}
-
-/// Richer widget interaction trait, implemented by node state types that support
-/// interactive mode (e.g. `TableUiState`). Extends `UiState` with key handling,
-/// inner-focus line range, viewport-width change notification, and layout.
-///
-/// Implementors must also override `UiState::as_component` / `as_component_mut`
-/// to return `Some(self)`.
-pub trait MessageComponent: UiState {
-    /// Whether this component supports interactive mode (Enter to activate).
-    fn supports_interaction(&self) -> bool {
-        false
-    }
-
-    /// Handle a key event in interaction mode.
-    fn handle_key(&mut self, _key: KeyEvent) -> ComponentKeyResult {
-        ComponentKeyResult::Unhandled
-    }
-
-    /// Half-open line range `[top, bot)` of the focused element within the
-    /// rendered node, used to drive `Precedence::InnerFocus`. Returns `None`
-    /// if no inner focus applies or layout has not yet been initialised.
-    fn focused_line_range(&self, _palette: &Palette) -> Option<(u16, u16)> {
-        None
-    }
-
-    /// Called when the available viewport width changes. The component should
-    /// clear any layout that depends on width (e.g. col_widths) unless the
-    /// user has manually overridden it.
-    fn on_viewport_width_changed(&mut self) {}
-
-    /// Perform a layout pass given `available_width` and return the computed
-    /// node height, or `None` to fall back to the default text-height path.
-    fn layout_pass(&mut self, _available_width: u16, _palette: &Palette) -> Option<u16> {
-        None
     }
 }
 
@@ -422,8 +339,8 @@ fn collect_hidden_run_backward(
 
 fn notify_viewport_width_changed(items: &mut [MessageState]) {
     for item in items.iter_mut() {
-        if let Some(c) = item.ui_state.as_mut().and_then(|s| s.as_component_mut()) {
-            c.on_viewport_width_changed();
+        if let Some(mut component) = get_message_component(item) {
+            component.on_viewport_width_changed();
         }
         notify_viewport_width_changed(&mut item.children);
     }
@@ -484,8 +401,9 @@ pub struct MessageState {
     pub expanded: bool,
     pub height: Option<u16>,
 
-    /// Rich widget state (e.g. `TableUiState`). Preserved across Replace ops via `UiState::on_update`.
-    pub ui_state: Option<Box<dyn UiState>>,
+    /// Rich widget state (e.g. `TableState`). Preserved across Replace/Update ops via
+    /// `MessageComponent::on_update`.
+    pub ui_state: Option<Box<dyn ComponentState>>,
 }
 
 impl MessageState {
@@ -582,7 +500,7 @@ impl MessageState {
         self
     }
 
-    pub fn ui_state(mut self, s: Box<dyn UiState>) -> Self {
+    pub fn ui_state(mut self, s: Box<dyn ComponentState>) -> Self {
         self.ui_state = Some(s);
         self
     }
@@ -820,14 +738,7 @@ impl TreeScrollViewState {
             } => {
                 apply_snapshot(&mut message, &self.reset_snapshot);
                 if let Some(path) = self.id_to_path.get(id).cloned() {
-                    // Merge ui_state: let the old state decide what to carry forward.
-                    let merged_ui_state = {
-                        let old_ui = get_node(&self.items, &path).and_then(|n| n.ui_state.as_ref());
-                        match old_ui {
-                            Some(old) => old.on_update(&message),
-                            None => message.ui_state.clone(),
-                        }
-                    };
+                    // Collect subtree IDs from the old node before replacing.
                     if let Some(old_node) = get_node(&self.items, &path) {
                         let old_ids = collect_subtree_ids(old_node);
                         for old_id in old_ids {
@@ -836,26 +747,33 @@ impl TreeScrollViewState {
                     }
                     register_subtree(&mut self.id_to_path, &path, &message);
                     if let Some(node) = get_node_mut(&mut self.items, &path) {
+                        // Merge ui_state: let old state decide how to blend with new data.
+                        let merged_ui = node
+                            .ui_state
+                            .as_ref()
+                            .and_then(|s| s.on_update(&message))
+                            .or_else(|| message.ui_state.clone());
                         *node = message;
-                        node.ui_state = merged_ui_state;
+                        node.ui_state = merged_ui;
                         clear_heights(std::slice::from_mut(node));
                     }
                 }
             }
-            TreeOperation::Update { ref id, message } => {
+            TreeOperation::Update {
+                ref id,
+                mut message,
+            } => {
                 if let Some(path) = self.id_to_path.get(id).cloned() {
-                    let merged_ui_state = {
-                        let old_ui = get_node(&self.items, &path).and_then(|n| n.ui_state.as_ref());
-                        match old_ui {
-                            Some(old) => old.on_update(&message),
-                            None => message.ui_state.clone(),
-                        }
-                    };
                     if let Some(node) = get_node_mut(&mut self.items, &path) {
                         let existing_children = std::mem::take(&mut node.children);
+                        let merged_ui = node
+                            .ui_state
+                            .as_ref()
+                            .and_then(|s| s.on_update(&message))
+                            .or_else(|| message.ui_state.take());
                         *node = message;
                         node.children = existing_children;
-                        node.ui_state = merged_ui_state;
+                        node.ui_state = merged_ui;
                         clear_heights(std::slice::from_mut(node));
                     }
                 }
@@ -1008,9 +926,8 @@ impl TreeScrollViewState {
                 // Disjoint field borrows: palette borrows self.theme, items borrows self.items.
                 let palette = &self.theme.palette;
                 let layout_h = get_node_mut(&mut self.items, path)
-                    .and_then(|n| n.ui_state.as_mut())
-                    .and_then(|s| s.as_component_mut())
-                    .and_then(|c| c.layout_pass(available, palette));
+                    .and_then(|n| get_message_component(n))
+                    .and_then(|mut c| c.layout_pass(available, palette));
 
                 if let Some(h) = layout_h {
                     get_node_mut(&mut self.items, path).unwrap().height = Some(h);
@@ -1042,13 +959,12 @@ impl TreeScrollViewState {
             .unwrap_or(false)
     }
 
-    /// Returns true if the currently selected node has a `MessageComponent` that
+    /// Returns true if the currently selected node has a `ComponentState` that
     /// supports interactive mode.
     pub fn is_interaction_supported(&self) -> bool {
         get_node(&self.items, &self.selection_index)
             .and_then(|n| n.ui_state.as_ref())
-            .and_then(|s| s.as_component())
-            .is_some_and(|c| c.supports_interaction())
+            .is_some_and(|s| s.supports_interaction())
     }
 
     /// Dispatch a key event to the selected node's `MessageComponent` and
@@ -1058,11 +974,8 @@ impl TreeScrollViewState {
         let path = self.selection_index.clone();
 
         let result = if let Some(node) = get_node_mut(&mut self.items, &path) {
-            let r = node
-                .ui_state
-                .as_mut()
-                .and_then(|s| s.as_component_mut())
-                .map(|c| c.handle_key(key))
+            let r = get_message_component(node)
+                .map(|mut c| c.handle_key(key))
                 .unwrap_or(ComponentKeyResult::Unhandled);
             if matches!(
                 r,
@@ -1090,13 +1003,13 @@ impl TreeScrollViewState {
         self.update_inner_focus();
     }
 
-    /// Recompute `InnerFocus` from the selected node's component's focused line range.
+    /// Recompute `InnerFocus` from the selected node's component state's focused line range.
     fn update_inner_focus(&mut self) {
         let path = self.selection_index.clone();
-        if let Some(line_range) = get_node(&self.items, &path)
-            .and_then(|n| n.ui_state.as_ref())
-            .and_then(|s| s.as_component())
-            .and_then(|c| c.focused_line_range(&self.theme.palette))
+        let palette = &self.theme.palette;
+        if let Some(line_range) = get_node_mut(&mut self.items, &path)
+            .and_then(|n| get_message_component(n))
+            .and_then(|s| s.focused_line_range(palette))
         {
             self.precedence = Precedence::InnerFocus { path, line_range };
         }

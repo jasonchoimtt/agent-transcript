@@ -4,10 +4,10 @@ use crate::config::TableConverterConfig;
 use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
-use crate::tree_scroll_view::table::{TableData, TableUiState};
+use crate::tree_scroll_view::table::{TableData, TableState};
 
 /// Converts AgentMessage nodes whose text is a single GFM table block into
-/// `MessageType::Table` nodes carrying a `TableUiState`.
+/// `MessageType::Table` nodes carrying a `TableState`.
 ///
 /// Runs after `MarkdownSplitter` so each node is already a single block.
 pub struct TableConverter {
@@ -105,7 +105,7 @@ fn build_table_node(source: &MessageState, data: TableData) -> MessageState {
     let rows = data.rows.len();
     let cols = data.headers.len();
     let brief = format!("Table: {}×{}", rows, cols);
-    let ui = TableUiState::new(data);
+    let ui = TableState::new(data);
     let mut node = MessageState::new(source.id.clone())
         .message_type(MessageType::Table)
         .show_more(true)
@@ -256,7 +256,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<TableUiState>()
+                .downcast_ref::<TableState>()
                 .unwrap();
             assert_eq!(ts.data.headers, vec!["H1", "H2"]);
             assert_eq!(ts.data.rows.len(), 2);

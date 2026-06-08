@@ -5,7 +5,7 @@ use ratatui::widgets::{StatefulWidget, Widget};
 use super::cursor::TreeCursor;
 use super::message_widget::MessageWidget;
 use super::predicates::nonzero_height;
-use super::state::{Precedence, TreeScrollViewState, get_node};
+use super::state::{Precedence, TreeScrollViewState, get_node, get_node_mut};
 use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
 use crate::terminal::placeholder::PlaceholderWidget;
 use crate::terminal::ui::TerminalWidget;
@@ -108,9 +108,16 @@ impl StatefulWidget for TreeScrollView<'_> {
                     height: visible_rows,
                 };
                 let selected = path == selection_index;
-                let node = get_node(&state.items, &path).unwrap();
 
-                if node.is_terminal {
+                // Read immutable data before taking mutable borrow for MessageWidget.
+                let (is_terminal, msg_style, highlight) = {
+                    let node = get_node(&state.items, &path).unwrap();
+                    let s = theme.style_for(&node.message_type);
+                    let h = state.search_highlight_for(&path);
+                    (node.is_terminal, s, h)
+                };
+
+                if is_terminal {
                     state.terminal_render_info =
                         Some((widget_area.x, widget_area.y, widget_area.height, skip));
                     // Move the pane ref out of self; the sentinel is never observed because
@@ -154,9 +161,8 @@ impl StatefulWidget for TreeScrollView<'_> {
                     // all the way to the end of the node (not clipped at the bottom).
                     let last_row_is_pad = skip + visible_rows == h;
 
-                    let msg_style = theme.style_for(&node.message_type);
-
-                    let highlight = state.search_highlight_for(&path);
+                    let node = get_node_mut(&mut state.items, &path).unwrap();
+                    let mark = state.marks.mark_for_id(&node.id);
 
                     MessageWidget {
                         node,
@@ -169,7 +175,7 @@ impl StatefulWidget for TreeScrollView<'_> {
                         palette: &theme.palette,
                         interaction: selected && message_interaction,
                         highlight,
-                        mark: state.marks.mark_for_id(&node.id),
+                        mark,
                     }
                     .render(widget_area, buf);
 

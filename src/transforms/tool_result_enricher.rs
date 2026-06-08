@@ -3,11 +3,12 @@ use crate::providers::ProviderKind;
 use crate::transforms::Transform;
 use crate::transforms::tool_formatter::filter_path;
 use crate::tree_operation::TreeOperation;
+use crate::tree_scroll_view::message_widget::component::ComponentState;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
-use crate::tree_scroll_view::tool_result::{PatchHunk, ToolResultUiState, render::make_brief};
+use crate::tree_scroll_view::tool_result::{PatchHunk, ToolResultState, render::make_brief};
 
 /// Detects ToolResult nodes carrying structured tool output JSON and attaches a
-/// [`ToolResultUiState`] so they render as rich widgets. Supports Claude and Cursor providers.
+/// [`ToolResultState`] so they render as rich widgets. Supports Claude and Cursor providers.
 pub struct ToolResultEnricher {
     context_lines: Option<usize>,
     workspace_path: Option<std::path::PathBuf>,
@@ -38,7 +39,7 @@ impl ToolResultEnricher {
         let json: serde_json::Value = serde_json::from_str(&msg.data).ok()?;
         let result = json.get("toolUseResult")?;
 
-        let ui_state: Box<dyn crate::tree_scroll_view::state::UiState> =
+        let ui_state: Box<dyn ComponentState> =
             if let Some(state) = self.try_parse_file_delta(result) {
                 Box::new(state)
             } else if let Some(state) = try_parse_shell_output(result) {
@@ -55,7 +56,7 @@ impl ToolResultEnricher {
         let output =
             json.pointer("/message/providerOptions/cursor/highLevelToolCallResult/output")?;
 
-        let ui_state: Box<dyn crate::tree_scroll_view::state::UiState> =
+        let ui_state: Box<dyn ComponentState> =
             if let Some(state) = self.try_parse_cursor_file_delta(output) {
                 Box::new(state)
             } else if let Some(state) = try_parse_cursor_shell_output(output) {
@@ -70,11 +71,11 @@ impl ToolResultEnricher {
     fn make_enriched(
         &self,
         msg: &MessageState,
-        ui_state: Box<dyn crate::tree_scroll_view::state::UiState>,
+        ui_state: Box<dyn ComponentState>,
     ) -> Option<MessageState> {
         let brief = ui_state
             .as_any()
-            .downcast_ref::<ToolResultUiState>()
+            .downcast_ref::<ToolResultState>()
             .map(make_brief)
             .unwrap_or_default();
 
@@ -86,7 +87,7 @@ impl ToolResultEnricher {
         Some(enriched)
     }
 
-    fn try_parse_file_delta(&self, result: &serde_json::Value) -> Option<ToolResultUiState> {
+    fn try_parse_file_delta(&self, result: &serde_json::Value) -> Option<ToolResultState> {
         let raw_path = result.get("filePath")?.as_str()?.to_string();
         let file_path = filter_path(raw_path, self.workspace_path.as_deref());
         let patch_arr = result.get("structuredPatch")?.as_array()?;
@@ -105,14 +106,14 @@ impl ToolResultEnricher {
             return None;
         }
 
-        Some(ToolResultUiState::file_delta(
+        Some(ToolResultState::file_delta(
             file_path,
             hunks,
             self.context_lines,
         ))
     }
 
-    fn try_parse_cursor_file_delta(&self, output: &serde_json::Value) -> Option<ToolResultUiState> {
+    fn try_parse_cursor_file_delta(&self, output: &serde_json::Value) -> Option<ToolResultState> {
         let success = output.get("success")?;
         let diff_str = success.get("diffString")?.as_str()?;
         let raw_path = success.get("path")?.as_str()?.to_string();
@@ -128,7 +129,7 @@ impl ToolResultEnricher {
             return None;
         }
 
-        Some(ToolResultUiState::file_delta(
+        Some(ToolResultState::file_delta(
             file_path,
             hunks,
             self.context_lines,
@@ -169,7 +170,7 @@ fn parse_hunk(v: &serde_json::Value) -> Option<PatchHunk> {
     })
 }
 
-fn try_parse_shell_output(result: &serde_json::Value) -> Option<ToolResultUiState> {
+fn try_parse_shell_output(result: &serde_json::Value) -> Option<ToolResultState> {
     // Must have at least one of stdout/stderr keys present.
     let has_stdout = result.get("stdout").is_some();
     let has_stderr = result.get("stderr").is_some();
@@ -193,10 +194,10 @@ fn try_parse_shell_output(result: &serde_json::Value) -> Option<ToolResultUiStat
         return None;
     }
 
-    Some(ToolResultUiState::shell_output(stderr, stdout))
+    Some(ToolResultState::shell_output(stderr, stdout))
 }
 
-fn try_parse_cursor_shell_output(output: &serde_json::Value) -> Option<ToolResultUiState> {
+fn try_parse_cursor_shell_output(output: &serde_json::Value) -> Option<ToolResultState> {
     let success = output.get("success")?;
     let interleaved = success.get("interleavedOutput")?.as_str()?;
 
@@ -204,7 +205,7 @@ fn try_parse_cursor_shell_output(output: &serde_json::Value) -> Option<ToolResul
         return None;
     }
 
-    Some(ToolResultUiState::shell_output(
+    Some(ToolResultState::shell_output(
         String::new(),
         interleaved.to_string(),
     ))
@@ -350,7 +351,7 @@ mod tests {
     use super::*;
     use crate::config::FileDeltaWidgetConfig;
     use crate::providers::ProviderKind;
-    use crate::tree_scroll_view::tool_result::{ToolResultPayload, ToolResultUiState};
+    use crate::tree_scroll_view::tool_result::{ToolResultPayload, ToolResultState};
 
     fn enricher() -> ToolResultEnricher {
         ToolResultEnricher::new(
@@ -421,7 +422,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             assert!(matches!(ui.payload, ToolResultPayload::FileDelta(_)));
         } else {
@@ -443,7 +444,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             assert!(matches!(ui.payload, ToolResultPayload::ShellOutput(_)));
         } else {
@@ -516,7 +517,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             if let ToolResultPayload::FileDelta(fd) = &ui.payload {
                 assert_eq!(fd.file_path, "/src/foo.rs");
@@ -551,7 +552,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             if let ToolResultPayload::FileDelta(fd) = &ui.payload {
                 assert_eq!(fd.file_path, "/src/main.rs");
@@ -603,7 +604,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             if let ToolResultPayload::ShellOutput(so) = &ui.payload {
                 assert_eq!(so.stderr, "err");
@@ -670,7 +671,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             if let ToolResultPayload::ShellOutput(so) = &ui.payload {
                 assert_eq!(so.stdout, "hello\n");
@@ -698,7 +699,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_any()
-                .downcast_ref::<ToolResultUiState>()
+                .downcast_ref::<ToolResultState>()
                 .unwrap();
             if let ToolResultPayload::FileDelta(fd) = &ui.payload {
                 assert_eq!(fd.file_path, "/src/foo.ts");

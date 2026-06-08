@@ -5,11 +5,11 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use super::super::super::markdown::render_markdown;
-use super::{CELL_PADDING, TableUiState, row_render_height};
-use crate::theme::Palette;
+use super::{CELL_PADDING, TableState, row_render_height};
 use crate::theme::styles::TableStyle;
+use crate::tree_scroll_view::message_widget::component::ContentRenderContext;
 
-/// Render the table grid into `text_area`, skipping the first `skip_lines` rows.
+/// Render the table grid into `text_area`, skipping the first `ctx.skip_lines` rows.
 ///
 /// Each cell is a `Block` with `merge_borders(MergeStrategy::Exact)` so junction
 /// characters (┼ ├ ┤ ┬ ┴) are resolved automatically from adjacent borders.
@@ -17,15 +17,13 @@ use crate::theme::styles::TableStyle;
 /// Both axes are computed via `Layout` on virtual rects sized to the table's natural
 /// dimensions — this prevents the constraint solver from shrinking any column or row.
 /// The row layout uses table-space (y=0 at table top); screen y is recovered via
-/// `text_area.y as i32 + table_y as i32 - skip_lines as i32`.
+/// `text_area.y as i32 + table_y as i32 - ctx.skip_lines as i32`.
 pub fn render_table(
     text_area: Rect,
-    state: &TableUiState,
-    interaction: bool,
-    palette: &Palette,
+    state: &TableState,
     style: &TableStyle,
     buf: &mut Buffer,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     if state.col_widths.is_empty() || text_area.height == 0 {
         return;
@@ -48,7 +46,7 @@ pub fn render_table(
             } else {
                 &data.rows[r - 1]
             };
-            row_render_height(cells, col_widths, palette)
+            row_render_height(cells, col_widths, ctx.palette)
         })
         .collect();
 
@@ -106,13 +104,13 @@ pub fn render_table(
         || first_col + col_areas.len() < num_cols;
 
     // ── Styles ────────────────────────────────────────────────────────────────
-    let border_style = style.border.to_style(palette);
-    let border_sel_style = style.border_selected.to_style(palette);
-    let header_style = style.header.to_style(palette);
-    let scroll_ind_style = style.scroll_indicator.to_style(palette);
+    let border_style = style.border.to_style(ctx.palette);
+    let border_sel_style = style.border_selected.to_style(ctx.palette);
+    let header_style = style.header.to_style(ctx.palette);
+    let scroll_ind_style = style.scroll_indicator.to_style(ctx.palette);
 
     // Convert table-space y → screen y (i32 arithmetic avoids underflow).
-    let table_offset: i32 = text_area.y as i32 - skip_lines as i32;
+    let table_offset: i32 = text_area.y as i32 - ctx.skip_lines as i32;
     let area_top = text_area.y as i32;
     let area_bot = (text_area.y + text_area.height) as i32;
 
@@ -145,7 +143,7 @@ pub fn render_table(
         let vis_top = block_top.max(area_top) as u16;
         let vis_bot = block_bot.min(area_bot) as u16;
 
-        let is_selected_row = interaction
+        let is_selected_row = ctx.interaction
             && match state.selected_row {
                 None => r == 0,
                 Some(dr) => r == dr + 1,
@@ -183,12 +181,12 @@ pub fn render_table(
                 borders
             };
 
-            let col_bs = if interaction && col == state.selected_col {
+            let col_bs = if ctx.interaction && col == state.selected_col {
                 border_sel_style
             } else {
                 border_style
             };
-            let is_selected_cell = is_selected_row && interaction && col == state.selected_col;
+            let is_selected_cell = is_selected_row && ctx.interaction && col == state.selected_col;
 
             let block = Block::new()
                 .borders(safe_borders)
@@ -197,7 +195,7 @@ pub fn render_table(
 
             if is_selected_cell {
                 block
-                    .style(style.cell_selected.to_style(palette))
+                    .style(style.cell_selected.to_style(ctx.palette))
                     .render(cell_area, buf);
             } else {
                 block.render(cell_area, buf);
@@ -226,7 +224,7 @@ pub fn render_table(
                     .unwrap_or("")
             };
 
-            let rendered = render_markdown(cell_str, palette);
+            let rendered = render_markdown(cell_str, ctx.palette);
             let text: Text<'_> = if r == 0 {
                 let lines = rendered
                     .lines
@@ -255,7 +253,7 @@ pub fn render_table(
                 para = para.scroll((content_skip, 0));
             }
             if is_selected_cell {
-                para = para.style(style.cell_selected.to_style(palette));
+                para = para.style(style.cell_selected.to_style(ctx.palette));
             }
             para.render(content_area, buf);
         }
@@ -263,7 +261,7 @@ pub fn render_table(
 
     // Fix the right border of the selected column: it was overwritten by the next column's
     // left border (rendered with normal style). Re-apply the selected style post-render.
-    if interaction {
+    if ctx.interaction {
         let sel_ci = state.selected_col.checked_sub(first_col);
         if let Some(ci) = sel_ci
             && ci < col_areas.len()

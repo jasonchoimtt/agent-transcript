@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    ComponentKeyResult, FileDeltaState, ToolResultPayload, ToolResultUiState, format_unified_diff,
+    ComponentKeyResult, FileDeltaState, ToolResultPayload, ToolResultState, format_unified_diff,
     max_context_in_hunk,
 };
 
-pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultUiState) -> ComponentKeyResult {
+pub fn handle_tool_result_key(key: KeyEvent, state: &mut ToolResultState) -> ComponentKeyResult {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     match key.code {

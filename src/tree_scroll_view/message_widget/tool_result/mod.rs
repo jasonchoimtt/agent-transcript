@@ -2,14 +2,19 @@ mod handler;
 pub mod render;
 
 use crossterm::event::KeyEvent;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
-use super::super::state::{ComponentKeyResult, MessageComponent, MessageState, UiState};
+use super::super::state::MessageState;
+use super::component::{
+    ComponentKeyResult, ComponentState, ContentRenderContext, MessageComponent,
+};
 use crate::theme::Palette;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub struct ToolResultUiState {
+pub struct ToolResultState {
     pub payload: ToolResultPayload,
     /// Space-toggled: expand to show all hunks / full output.
     pub expanded: bool,
@@ -48,7 +53,7 @@ pub struct ShellOutputState {
     pub stdout: String,
 }
 
-impl ToolResultUiState {
+impl ToolResultState {
     pub fn file_delta(
         file_path: String,
         hunks: Vec<PatchHunk>,
@@ -75,10 +80,10 @@ impl ToolResultUiState {
     }
 }
 
-// ── UiState / MessageComponent ────────────────────────────────────────────────
+// ── ComponentState ────────────────────────────────────────────────────────────
 
-impl UiState for ToolResultUiState {
-    fn clone_box(&self) -> Box<dyn UiState> {
+impl ComponentState for ToolResultState {
+    fn clone_box(&self) -> Box<dyn ComponentState> {
         Box::new(self.clone())
     }
 
@@ -94,53 +99,88 @@ impl UiState for ToolResultUiState {
         std::any::type_name::<Self>()
     }
 
-    fn on_update(&self, new_message: &MessageState) -> Option<Box<dyn UiState>> {
+    fn on_update(
+        &self,
+        new_message: &super::super::state::MessageState,
+    ) -> Option<Box<dyn ComponentState>> {
         let new_state = new_message
             .ui_state
             .as_ref()?
             .as_any()
-            .downcast_ref::<ToolResultUiState>()?;
-
+            .downcast_ref::<ToolResultState>()?;
         let mut preserved = new_state.clone();
         preserved.expanded = self.expanded;
         preserved.wrap = self.wrap;
-
-        if let (ToolResultPayload::FileDelta(old), ToolResultPayload::FileDelta(new_fd)) =
+        if let (ToolResultPayload::FileDelta(old_fd), ToolResultPayload::FileDelta(new_fd)) =
             (&self.payload, &mut preserved.payload)
         {
-            new_fd.context_lines = old.context_lines;
+            new_fd.context_lines = old_fd.context_lines;
         }
-
         Some(Box::new(preserved))
     }
 
-    fn as_component(&self) -> Option<&dyn MessageComponent> {
-        Some(self)
-    }
-
-    fn as_component_mut(&mut self) -> Option<&mut dyn MessageComponent> {
-        Some(self)
-    }
-}
-
-impl MessageComponent for ToolResultUiState {
     fn supports_interaction(&self) -> bool {
         true
     }
+}
 
-    fn handle_key(&mut self, key: KeyEvent) -> ComponentKeyResult {
-        handler::handle_tool_result_key(key, self)
+// ── ToolResultComponent ───────────────────────────────────────────────────────
+
+pub struct ToolResultComponent<'a> {
+    pub message: &'a mut MessageState,
+}
+
+impl<'a> ToolResultComponent<'a> {
+    fn state(&self) -> &ToolResultState {
+        self.message
+            .ui_state
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ToolResultState>()
+            .unwrap()
     }
 
-    fn focused_line_range(&self, _palette: &Palette) -> Option<(u16, u16)> {
-        None
+    fn state_mut(&mut self) -> &mut ToolResultState {
+        self.message
+            .ui_state
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<ToolResultState>()
+            .unwrap()
+    }
+}
+
+impl<'a> MessageComponent for ToolResultComponent<'a> {
+    fn message_mut(&mut self) -> &mut MessageState {
+        self.message
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> ComponentKeyResult {
+        let ts = self.state_mut();
+        handler::handle_tool_result_key(key, ts)
     }
 
     fn on_viewport_width_changed(&mut self) {}
 
     fn layout_pass(&mut self, available_width: u16, _palette: &Palette) -> Option<u16> {
-        let height = render::compute_height(self, available_width);
-        Some(height)
+        let ts = self.state();
+        Some(render::compute_height(ts, available_width))
+    }
+
+    fn render_content(&self, area: Rect, buf: &mut Buffer, ctx: &ContentRenderContext<'_>) {
+        use crate::theme::styles::MessageStyle;
+        let ts = self.state();
+        let MessageStyle::ToolResult(tr_style) = ctx.style else {
+            return;
+        };
+        if self.message.show_more {
+            render::render_tool_result(area, ts, tr_style, buf, ctx);
+        } else {
+            let collapsed = !self.message.expanded && !self.message.children.is_empty();
+            render::render_compact(area, ts, tr_style, buf, collapsed, ctx);
+        }
     }
 }
 
@@ -446,6 +486,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+    use crate::tree_scroll_view::state::MessageState;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -465,8 +506,27 @@ mod tests {
         }
     }
 
-    fn make_fd_state(hunks: Vec<PatchHunk>) -> ToolResultUiState {
-        ToolResultUiState::file_delta("src/foo.rs".to_string(), hunks, None)
+    fn make_fd_msg(hunks: Vec<PatchHunk>) -> MessageState {
+        let ts = ToolResultState::file_delta("src/foo.rs".to_string(), hunks, None);
+        MessageState::new("test").ui_state(Box::new(ts))
+    }
+
+    fn tr_state(msg: &MessageState) -> &ToolResultState {
+        msg.ui_state
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ToolResultState>()
+            .unwrap()
+    }
+
+    fn tr_state_mut(msg: &mut MessageState) -> &mut ToolResultState {
+        msg.ui_state
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<ToolResultState>()
+            .unwrap()
     }
 
     // ── Parsing / detection ───────────────────────────────────────────────────
@@ -474,13 +534,13 @@ mod tests {
     #[test]
     fn enricher_detects_file_delta() {
         let hunk = make_hunk(&[" ctx", "-old", "+new"]);
-        let state = ToolResultUiState::file_delta("a.rs".to_string(), vec![hunk], None);
+        let state = ToolResultState::file_delta("a.rs".to_string(), vec![hunk], None);
         assert!(matches!(state.payload, ToolResultPayload::FileDelta(_)));
     }
 
     #[test]
     fn enricher_detects_shell_output() {
-        let state = ToolResultUiState::shell_output("err".to_string(), "out".to_string());
+        let state = ToolResultState::shell_output("err".to_string(), "out".to_string());
         assert!(matches!(state.payload, ToolResultPayload::ShellOutput(_)));
     }
 
@@ -691,20 +751,20 @@ mod tests {
     #[test]
     fn space_toggles_expanded() {
         let h = make_hunk(&["+a"]);
-        let mut state = make_fd_state(vec![h]);
-        assert!(!state.expanded);
-        state.handle_key(press(KeyCode::Char(' ')));
-        assert!(state.expanded);
-        state.handle_key(press(KeyCode::Char(' ')));
-        assert!(!state.expanded);
+        let mut msg = make_fd_msg(vec![h]);
+        assert!(!tr_state(&msg).expanded);
+        ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char(' ')));
+        assert!(tr_state(&msg).expanded);
+        ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char(' ')));
+        assert!(!tr_state(&msg).expanded);
     }
 
     #[test]
     fn esc_exits_interaction() {
         let h = make_hunk(&["+a"]);
-        let mut state = make_fd_state(vec![h]);
+        let mut msg = make_fd_msg(vec![h]);
         assert!(matches!(
-            state.handle_key(press(KeyCode::Esc)),
+            ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Esc)),
             ComponentKeyResult::ExitInteraction
         ));
     }
@@ -712,9 +772,9 @@ mod tests {
     #[test]
     fn ctrl_c_exits_interaction() {
         let h = make_hunk(&["+a"]);
-        let mut state = make_fd_state(vec![h]);
+        let mut msg = make_fd_msg(vec![h]);
         assert!(matches!(
-            state.handle_key(press_ctrl(KeyCode::Char('c'))),
+            ToolResultComponent { message: &mut msg }.handle_key(press_ctrl(KeyCode::Char('c'))),
             ComponentKeyResult::ExitInteraction
         ));
     }
@@ -722,9 +782,9 @@ mod tests {
     #[test]
     fn ctrl_n_passthrough() {
         let h = make_hunk(&["+a"]);
-        let mut state = make_fd_state(vec![h]);
+        let mut msg = make_fd_msg(vec![h]);
         assert!(matches!(
-            state.handle_key(press_ctrl(KeyCode::Char('n'))),
+            ToolResultComponent { message: &mut msg }.handle_key(press_ctrl(KeyCode::Char('n'))),
             ComponentKeyResult::Passthrough
         ));
     }
@@ -734,9 +794,12 @@ mod tests {
     #[test]
     fn yy_copies_unified_diff() {
         let hunk = make_hunk(&[" ctx", "-old", "+new"]);
-        let mut state = ToolResultUiState::file_delta("src/foo.rs".to_string(), vec![hunk], None);
-        state.handle_key(press(KeyCode::Char('y'))); // pending_y set
-        let r = state.handle_key(press(KeyCode::Char('y')));
+        let mut msg = {
+            let ts = ToolResultState::file_delta("src/foo.rs".to_string(), vec![hunk], None);
+            MessageState::new("test").ui_state(Box::new(ts))
+        };
+        ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('y')));
+        let r = ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('y')));
         if let ComponentKeyResult::Copy { content } = r {
             assert!(content.contains("--- a/src/foo.rs"));
             assert!(content.contains("+++ b/src/foo.rs"));
@@ -751,8 +814,11 @@ mod tests {
     #[test]
     fn capital_y_copies_unified_diff() {
         let hunk = make_hunk(&["+line"]);
-        let mut state = ToolResultUiState::file_delta("a.rs".to_string(), vec![hunk], None);
-        let r = state.handle_key(press(KeyCode::Char('Y')));
+        let mut msg = {
+            let ts = ToolResultState::file_delta("a.rs".to_string(), vec![hunk], None);
+            MessageState::new("test").ui_state(Box::new(ts))
+        };
+        let r = ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('Y')));
         assert!(matches!(r, ComponentKeyResult::Copy { .. }));
     }
 
@@ -760,8 +826,11 @@ mod tests {
     fn copy_always_includes_all_hunks() {
         let h1 = make_hunk(&["+hunk1"]);
         let h2 = make_hunk(&["+hunk2"]);
-        let mut state = ToolResultUiState::file_delta("f.rs".to_string(), vec![h1, h2], None);
-        let r = state.handle_key(press(KeyCode::Char('Y')));
+        let mut msg = {
+            let ts = ToolResultState::file_delta("f.rs".to_string(), vec![h1, h2], None);
+            MessageState::new("test").ui_state(Box::new(ts))
+        };
+        let r = ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('Y')));
         if let ComponentKeyResult::Copy { content } = r {
             assert!(content.contains("+hunk1"));
             assert!(content.contains("+hunk2"));
@@ -775,25 +844,23 @@ mod tests {
     #[test]
     fn minus_from_none_steps_down_from_max() {
         let hunk = make_hunk(&[" c1", " c2", " c3", "+add"]);
-        let mut state = make_fd_state(vec![hunk]);
-        // context_lines starts as None (show all → 3 context lines)
-        state.handle_key(press(KeyCode::Char('-')));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.context_lines, Some(2)); // max=3, step to 2
+        let mut msg = make_fd_msg(vec![hunk]);
+        ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('-')));
+        if let ToolResultPayload::FileDelta(fd) = &tr_state(&msg).payload {
+            assert_eq!(fd.context_lines, Some(2));
         }
     }
 
     #[test]
     fn equals_from_max_snaps_to_none() {
         let hunk = make_hunk(&[" c1", " c2", "+add"]);
-        let mut state = make_fd_state(vec![hunk]);
-        // max_context = 2; set context_lines = Some(2) manually
-        if let ToolResultPayload::FileDelta(fd) = &mut state.payload {
+        let mut msg = make_fd_msg(vec![hunk]);
+        if let ToolResultPayload::FileDelta(fd) = &mut tr_state_mut(&mut msg).payload {
             fd.context_lines = Some(2);
         }
-        state.handle_key(press(KeyCode::Char('=')));
-        if let ToolResultPayload::FileDelta(fd) = &state.payload {
-            assert_eq!(fd.context_lines, None); // snapped back
+        ToolResultComponent { message: &mut msg }.handle_key(press(KeyCode::Char('=')));
+        if let ToolResultPayload::FileDelta(fd) = &tr_state(&msg).payload {
+            assert_eq!(fd.context_lines, None);
         }
     }
 }

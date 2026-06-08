@@ -12,7 +12,8 @@ use crate::picker::handler::PickerAction;
 use crate::providers::ProviderKind;
 use crate::terminal::PanelState;
 use crate::terminal::keys::key_event_to_bytes;
-use crate::tree_scroll_view::{ComponentKeyResult, TreeAction};
+use crate::tree_scroll_view::TreeAction;
+use crate::tree_scroll_view::message_widget::component::ComponentKeyResult;
 
 use crate::app::{App, AppMode, AppScreen, ConfirmKind};
 

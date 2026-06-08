@@ -6,11 +6,12 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use super::{
     DiffLine, DiffLineKind, FileDeltaState, PatchHunk, ShellOutputState, ToolResultPayload,
-    ToolResultUiState, build_diff_lines, collect_shell_lines,
+    ToolResultState, build_diff_lines, collect_shell_lines,
 };
 use crate::theme::Palette;
 use crate::theme::styles::ToolResultStyle;
 use crate::tree_scroll_view::ansi::{clip_to_visual_width, visual_width};
+use crate::tree_scroll_view::message_widget::component::ContentRenderContext;
 
 /// Total chars used by the line-number prefix: `{4} {4}  ` = 11.
 pub const LINE_NUM_PREFIX_LEN: usize = 11;
@@ -46,7 +47,7 @@ fn diff_ellipsis_line(hidden: usize, ln_style: Style) -> Line<'static> {
 
 // ── Height ────────────────────────────────────────────────────────────────────
 
-pub fn compute_height(state: &ToolResultUiState, available_width: u16) -> u16 {
+pub fn compute_height(state: &ToolResultState, available_width: u16) -> u16 {
     match &state.payload {
         ToolResultPayload::FileDelta(fd) => {
             compute_file_delta_height(fd, state.expanded, state.wrap, available_width)
@@ -124,40 +125,20 @@ fn compute_shell_height(so: &ShellOutputState, expanded: bool, wrap: bool, width
 
 pub fn render_tool_result(
     text_area: Rect,
-    state: &ToolResultUiState,
-    _interaction: bool,
-    palette: &Palette,
+    state: &ToolResultState,
     style: &ToolResultStyle,
     buf: &mut Buffer,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     if text_area.height == 0 {
         return;
     }
     match &state.payload {
         ToolResultPayload::FileDelta(fd) => {
-            render_file_delta(
-                text_area,
-                fd,
-                state.expanded,
-                state.wrap,
-                palette,
-                style,
-                buf,
-                skip_lines,
-            );
+            render_file_delta(text_area, fd, state.expanded, state.wrap, style, buf, ctx);
         }
         ToolResultPayload::ShellOutput(so) => {
-            render_shell_output(
-                text_area,
-                so,
-                state.expanded,
-                state.wrap,
-                palette,
-                style,
-                buf,
-                skip_lines,
-            );
+            render_shell_output(text_area, so, state.expanded, state.wrap, style, buf, ctx);
         }
     }
 }
@@ -169,20 +150,19 @@ fn render_file_delta(
     fd: &FileDeltaState,
     expanded: bool,
     wrap: bool,
-    palette: &Palette,
     style: &ToolResultStyle,
     buf: &mut Buffer,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     if wrap {
-        render_file_delta_wrapped(area, fd, expanded, palette, style, buf, skip_lines);
+        render_file_delta_wrapped(area, fd, expanded, style, buf, ctx);
         return;
     }
 
-    let file_path_style = style.file_path.to_style(palette);
-    let stat_removed_style = style.diff_stat_removed.to_style(palette);
-    let stat_added_style = style.diff_stat_added.to_style(palette);
-    let ln_style = style.line_num.to_style(palette);
+    let file_path_style = style.file_path.to_style(ctx.palette);
+    let stat_removed_style = style.diff_stat_removed.to_style(ctx.palette);
+    let stat_added_style = style.diff_stat_added.to_style(ctx.palette);
+    let ln_style = style.line_num.to_style(ctx.palette);
 
     let n_hunks = fd.hunks.len();
     let header = build_header_line(
@@ -203,7 +183,7 @@ fn render_file_delta(
     for hunk in &fd.hunks[..visible_count] {
         let (diff_lines, hidden) = build_diff_lines(hunk, expanded, fd.context_lines);
         for dl in &diff_lines {
-            content_lines.push(build_diff_line(dl, area.width, palette, style));
+            content_lines.push(build_diff_line(dl, area.width, ctx.palette, style));
         }
         if hidden > 0 {
             content_lines.push(diff_ellipsis_line(hidden, ln_style));
@@ -214,7 +194,7 @@ fn render_file_delta(
     }
 
     Paragraph::new(content_lines)
-        .scroll((skip_lines, 0))
+        .scroll((ctx.skip_lines, 0))
         .render(area, buf);
 }
 
@@ -228,23 +208,22 @@ fn render_file_delta_wrapped(
     area: Rect,
     fd: &FileDeltaState,
     expanded: bool,
-    palette: &Palette,
     style: &ToolResultStyle,
     buf: &mut Buffer,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     let content_width = (area.width as usize).saturating_sub(LINE_NUM_PREFIX_LEN) as u16;
     if content_width == 0 {
         return;
     }
 
-    let file_path_style = style.file_path.to_style(palette);
-    let stat_removed_style = style.diff_stat_removed.to_style(palette);
-    let stat_added_style = style.diff_stat_added.to_style(palette);
-    let ln_style = style.line_num.to_style(palette);
+    let file_path_style = style.file_path.to_style(ctx.palette);
+    let stat_removed_style = style.diff_stat_removed.to_style(ctx.palette);
+    let stat_added_style = style.diff_stat_added.to_style(ctx.palette);
+    let ln_style = style.line_num.to_style(ctx.palette);
 
-    // Row 0 is the header. If skip_lines == 0, render header at top and shrink content area.
-    let (header_area, content_area, content_skip) = if skip_lines == 0 {
+    // Row 0 is the header. If ctx.skip_lines == 0, render header at top and shrink content area.
+    let (header_area, content_area, content_skip) = if ctx.skip_lines == 0 {
         let ha = Rect { height: 1, ..area };
         let ca = Rect {
             y: area.y + 1,
@@ -253,7 +232,7 @@ fn render_file_delta_wrapped(
         };
         (Some(ha), ca, 0u16)
     } else {
-        (None, area, skip_lines - 1)
+        (None, area, ctx.skip_lines - 1)
     };
 
     if let Some(ha) = header_area {
@@ -289,7 +268,7 @@ fn render_file_delta_wrapped(
         let (diff_lines, hidden) = build_diff_lines(hunk, expanded, fd.context_lines);
 
         for dl in &diff_lines {
-            let (line_style, ln_bg_style) = diff_line_styles(dl, palette, style);
+            let (line_style, ln_bg_style) = diff_line_styles(dl, ctx.palette, style);
 
             let rows = Paragraph::new(Line::from(Span::raw(dl.content.clone())))
                 .wrap(Wrap { trim: false })
@@ -475,10 +454,9 @@ fn render_shell_output(
     so: &ShellOutputState,
     expanded: bool,
     wrap: bool,
-    palette: &Palette,
     style: &ToolResultStyle,
     buf: &mut Buffer,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     let max = if expanded {
         None
@@ -487,8 +465,8 @@ fn render_shell_output(
     };
     let (lines, hidden) = collect_shell_lines(so, max);
 
-    let stderr_style = style.stderr.to_style(palette);
-    let stdout_style = style.stdout.to_style(palette);
+    let stderr_style = style.stderr.to_style(ctx.palette);
+    let stdout_style = style.stdout.to_style(ctx.palette);
 
     let mut rendered: Vec<Line<'static>> = Vec::new();
 
@@ -505,7 +483,7 @@ fn render_shell_output(
         rendered.push(Line::from(Span::styled(content, s)));
     }
 
-    let para = Paragraph::new(rendered).scroll((skip_lines, 0));
+    let para = Paragraph::new(rendered).scroll((ctx.skip_lines, 0));
     if wrap {
         para.wrap(Wrap { trim: false }).render(area, buf);
     } else {
@@ -518,18 +496,17 @@ fn render_shell_output(
 /// Render the compact (show_more=false) one-liner with per-span styling.
 pub fn render_compact(
     area: Rect,
-    state: &ToolResultUiState,
-    palette: &Palette,
+    state: &ToolResultState,
     style: &ToolResultStyle,
     buf: &mut Buffer,
     collapsed: bool,
-    skip_lines: u16,
+    ctx: &ContentRenderContext<'_>,
 ) {
     match &state.payload {
         ToolResultPayload::FileDelta(fd) => {
-            let file_path_style = style.file_path.to_style(palette);
-            let stat_removed_style = style.diff_stat_removed.to_style(palette);
-            let stat_added_style = style.diff_stat_added.to_style(palette);
+            let file_path_style = style.file_path.to_style(ctx.palette);
+            let stat_removed_style = style.diff_stat_removed.to_style(ctx.palette);
+            let stat_added_style = style.diff_stat_added.to_style(ctx.palette);
             let (added, removed) = count_file_stats(&fd.hunks);
             let stat_rm = format!(" -{removed}");
             let stat_add = format!(" +{added}");
@@ -553,7 +530,7 @@ pub fn render_compact(
                 spans.push(Span::styled("▾", Style::new().dim()));
             }
             Paragraph::new(Line::from(spans))
-                .scroll((skip_lines, 0))
+                .scroll((ctx.skip_lines, 0))
                 .render(area, buf);
         }
         ToolResultPayload::ShellOutput(so) => {
@@ -569,14 +546,14 @@ pub fn render_compact(
             } else {
                 (summary, false)
             };
-            let mut spans = vec![Span::styled(clipped, style.content.to_style(palette))];
+            let mut spans = vec![Span::styled(clipped, style.content.to_style(ctx.palette))];
             if truncated {
                 spans.push(Span::styled("…", Style::new().dim()));
             } else if collapsed {
                 spans.push(Span::styled("▾", Style::new().dim()));
             }
             Paragraph::new(Line::from(spans))
-                .scroll((skip_lines, 0))
+                .scroll((ctx.skip_lines, 0))
                 .render(area, buf);
         }
     }
@@ -595,7 +572,7 @@ fn build_shell_brief(so: &ShellOutputState) -> String {
 }
 
 /// One-liner brief for use as the `brief` field in MessageState.
-pub fn make_brief(state: &ToolResultUiState) -> String {
+pub fn make_brief(state: &ToolResultState) -> String {
     match &state.payload {
         ToolResultPayload::FileDelta(fd) => {
             let n_hunks = fd.hunks.len();

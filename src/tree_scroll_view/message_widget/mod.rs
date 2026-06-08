@@ -1,27 +1,58 @@
 mod brief;
+pub mod component;
 mod json;
 mod prose;
 pub mod table;
 mod tool_call;
 pub mod tool_result;
 
-use ansi_to_tui::IntoText;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::Widget;
 
-use super::state::{MessageState, SearchHighlight};
-use crate::theme::styles::{MessageStyle, ToolResultStyle};
+use super::state::{MessageState, MessageType, SearchHighlight};
+use crate::theme::styles::MessageStyle;
 use crate::theme::{ColorVar, Palette};
-use table::{TableUiState, render::render_table};
-use tool_result::{
-    ToolResultUiState,
-    render::{render_compact, render_tool_result},
-};
+use crate::tree_scroll_view::message_widget::component::{ContentRenderContext, MessageComponent};
+use table::{TableComponent, TableState};
+use tool_result::{ToolResultComponent, ToolResultState};
+
+/// Returns a boxed [`MessageComponent`] for the given node, or `None` for
+/// nodes that should not receive component-level rendering (hidden, group, terminal).
+pub fn get_message_component<'a>(
+    node: &'a mut MessageState,
+) -> Option<Box<dyn MessageComponent + 'a>> {
+    // Priority 1: stored state identifies the component type.
+    if node
+        .ui_state
+        .as_ref()
+        .is_some_and(|s| s.as_any().is::<TableState>())
+    {
+        return Some(Box::new(TableComponent { message: node }));
+    }
+    if node
+        .ui_state
+        .as_ref()
+        .is_some_and(|s| s.as_any().is::<ToolResultState>())
+    {
+        return Some(Box::new(ToolResultComponent { message: node }));
+    }
+
+    // Priority 2: message type.
+    match node.message_type {
+        MessageType::ToolCall => Some(Box::new(tool_call::ToolCallComponent { message: node })),
+        MessageType::Json => Some(Box::new(json::JsonComponent { message: node })),
+        MessageType::Table => None, // Table without TableState ui_state — degenerate
+        MessageType::ToolResult => {
+            // No rich state — render as prose.
+            Some(Box::new(prose::ProseComponent { message: node }))
+        }
+        _ => Some(Box::new(prose::ProseComponent { message: node })),
+    }
+}
 
 pub struct MessageWidget<'a> {
-    pub node: &'a MessageState,
+    pub node: &'a mut MessageState,
     pub depth: usize,
     pub selected: bool,
     /// Lines of this node's rendered content to skip at the top (partial first-node render).
@@ -80,16 +111,16 @@ impl Widget for MessageWidget<'_> {
         // otherwise the configured message-type glyph (or space if show_indicator is false).
         let prefix_len = self.depth * 2 + 2;
 
+        // Read node fields needed for indicator before taking mutable borrow.
+        let show_indicator = self.node.show_indicator;
+        let xml_tag = self.node.tag.clone();
+
         if self.skip_lines == 0 {
             let col = area.x + 1 + (self.depth * 2) as u16;
             if let Some(cell) = buf.cell_mut((col, area.y))
-                && self.node.show_indicator
+                && show_indicator
             {
-                let xml_tag = self.node.tag.as_deref();
-                let (msg_indicator, msg_indicator_style) = self.style.indicator(xml_tag);
-                // An empty symbol writes "" to the terminal (no output), which can't
-                // overwrite a previously rendered glyph at that position. Use a space
-                // to actively clear the cell instead.
+                let (msg_indicator, msg_indicator_style) = self.style.indicator(xml_tag.as_deref());
                 let sym = msg_indicator.map(|s| if s.is_empty() { " " } else { s });
                 if let Some(sym) = sym {
                     let render_style = if let Some(s) = msg_indicator_style {
@@ -110,107 +141,16 @@ impl Widget for MessageWidget<'_> {
             height: area.height,
         };
 
-        match self.style {
-            MessageStyle::ToolCall(tc_style) => {
-                tool_call::render_tool_call(
-                    text_area,
-                    buf,
-                    self.node,
-                    tc_style,
-                    self.palette,
-                    self.skip_lines,
-                );
-            }
-            MessageStyle::Json(json_style) => {
-                json::render_json(
-                    text_area,
-                    buf,
-                    self.node,
-                    json_style,
-                    self.palette,
-                    self.skip_lines,
-                );
-            }
-            MessageStyle::Table(table_style) => {
-                if self.node.show_more {
-                    if let Some(ts) = self
-                        .node
-                        .ui_state
-                        .as_deref()
-                        .and_then(|s| s.as_any().downcast_ref::<TableUiState>())
-                    {
-                        render_table(
-                            text_area,
-                            ts,
-                            self.interaction,
-                            self.palette,
-                            table_style,
-                            buf,
-                            self.skip_lines,
-                        );
-                    }
-                } else {
-                    // Compact: render the brief summary as a single line.
-                    let source = self.node.brief.as_deref().unwrap_or("Table");
-                    let (clipped, truncated) = brief::clip_brief(source, text_area.width as usize);
-                    let line = Line::from(Span::styled(
-                        clipped,
-                        table_style.cell.to_style(self.palette),
-                    ));
-                    brief::render_brief_line(
-                        text_area,
-                        buf,
-                        line,
-                        truncated,
-                        false,
-                        self.skip_lines,
-                    );
-                }
-            }
-            MessageStyle::ToolResult(tr_style) => {
-                render_tool_result_variant(
-                    text_area,
-                    buf,
-                    self.node,
-                    tr_style,
-                    self.palette,
-                    self.skip_lines,
-                    self.interaction,
-                );
-            }
-            other_style => {
-                let xml_tag = self.node.tag.as_deref();
-                let content_style = match other_style {
-                    MessageStyle::UserMessage(s) => {
-                        s.resolve(xml_tag).content.to_style(self.palette)
-                    }
-                    MessageStyle::AgentMessage(s) => s.content.to_style(self.palette),
-                    MessageStyle::Thinking(s) => s.content.to_style(self.palette),
-                    MessageStyle::TaskSummary(s) => s.content.to_style(self.palette),
-                    MessageStyle::Container(s) => s.resolve(xml_tag).content.to_style(self.palette),
-                    MessageStyle::System(s) => s.content.to_style(self.palette),
-                    MessageStyle::Other(s) => s.resolve(xml_tag).content.to_style(self.palette),
-                    MessageStyle::ToolCall(_)
-                    | MessageStyle::Json(_)
-                    | MessageStyle::Table(_)
-                    | MessageStyle::ToolResult(_) => {
-                        unreachable!()
-                    }
-                };
+        let ctx = ContentRenderContext {
+            palette: self.palette,
+            style: &self.style,
+            skip_lines: self.skip_lines,
+            interaction: self.interaction,
+            highlight: self.highlight.as_ref(),
+        };
 
-                let is_markdown = other_style.uses_markdown(xml_tag);
-
-                prose::render_prose(
-                    text_area,
-                    buf,
-                    self.node,
-                    content_style,
-                    is_markdown,
-                    self.skip_lines,
-                    self.palette,
-                    self.highlight.as_ref(),
-                );
-            }
+        if let Some(component) = get_message_component(self.node) {
+            component.render_content(text_area, buf, &ctx);
         }
 
         // Selection gutter at col 0.
@@ -245,77 +185,5 @@ impl Widget for MessageWidget<'_> {
                 }
             }
         }
-    }
-}
-
-fn render_tool_result_variant(
-    text_area: Rect,
-    buf: &mut Buffer,
-    node: &MessageState,
-    tr_style: &ToolResultStyle,
-    palette: &Palette,
-    skip_lines: u16,
-    interaction: bool,
-) {
-    let display_text = node.text.as_deref().unwrap_or("");
-    let collapsed_with_children = !node.expanded && !node.children.is_empty();
-
-    if node.show_more {
-        if let Some(ts) = node
-            .ui_state
-            .as_deref()
-            .and_then(|s| s.as_any().downcast_ref::<ToolResultUiState>())
-        {
-            render_tool_result(
-                text_area,
-                ts,
-                interaction,
-                palette,
-                tr_style,
-                buf,
-                skip_lines,
-            );
-        } else {
-            // No rich widget — fall through to plain text.
-            let content_style = tr_style.content.to_style(palette);
-            let mut text = display_text
-                .into_text()
-                .unwrap_or_else(|_| Text::raw(display_text));
-            text.style = content_style;
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .scroll((skip_lines, 0))
-                .render(text_area, buf);
-        }
-    } else if let Some(ts) = node
-        .ui_state
-        .as_deref()
-        .and_then(|s| s.as_any().downcast_ref::<ToolResultUiState>())
-    {
-        render_compact(
-            text_area,
-            ts,
-            palette,
-            tr_style,
-            buf,
-            collapsed_with_children,
-            skip_lines,
-        );
-    } else {
-        // Compact: render brief summary as a single line.
-        let source = node
-            .brief
-            .as_deref()
-            .unwrap_or_else(|| display_text.lines().next().unwrap_or(""));
-        let (clipped, truncated) = brief::clip_brief(source, text_area.width as usize);
-        let line = Line::from(Span::styled(clipped, tr_style.content.to_style(palette)));
-        brief::render_brief_line(
-            text_area,
-            buf,
-            line,
-            truncated,
-            collapsed_with_children,
-            skip_lines,
-        );
     }
 }
