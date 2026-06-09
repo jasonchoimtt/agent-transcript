@@ -2100,9 +2100,10 @@ impl TreeScrollViewState {
             raw
         };
         let end = self.turn_end_run_start_path(turn_idx);
-        // Guard against is_terminal: a terminal path like [n] is always lexicographically
-        // greater than any content path, so we must not treat it as "already past end".
-        if !is_terminal && self.selection_index >= end {
+        // "Past the end going backwards" means selection is at or before the run-start.
+        // Guard against is_terminal: [n] is always lexicographically greater than any
+        // content path, so we must not treat it as "not yet past end".
+        if !is_terminal && self.selection_index <= end {
             if turn_idx == 0 {
                 return;
             }

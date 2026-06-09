@@ -1510,12 +1510,13 @@ fn select_prev_turn_start_retreats_to_prev_when_already_at_start() {
 }
 
 #[test]
-fn select_prev_turn_end_reaches_current_turn_end() {
+fn select_prev_turn_end_retreats_when_before_run_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 0, 0]; // start of turn 1, not at its end
+    state.selection_index = vec![1, 0, 0]; // start of turn 1, before its run-start end [1,1,1]
 
-    state.select_prev_turn_end(); // → agent:1 (run-start end of current turn 1)
-    assert_eq!(sel(&state), vec![1, 1, 1]);
+    // [1,0,0] <= [1,1,1]: already past the end going backwards → retreat to turn 0 end
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![0, 1, 2, 0]);
 }
 
 #[test]
@@ -1528,24 +1529,23 @@ fn select_prev_turn_end_retreats_to_prev_when_already_at_end() {
 }
 
 #[test]
-fn select_prev_turn_end_retreats_from_mid_run() {
+fn select_prev_turn_end_lands_on_run_start_from_mid_run() {
     let mut state = three_turn_mid_run_tree();
-    state.selection_index = vec![1, 0, 1]; // agent:t1b — past run start [1,0,0]
+    state.selection_index = vec![1, 0, 1]; // agent:t1b — after run start [1,0,0]
 
-    state.select_prev_turn_end(); // → user:t0 (run-start end of turn 0)
-    assert_eq!(sel(&state), vec![0, 0, 0]);
+    // [1,0,1] > [1,0,0]: haven't reached the run-start going backwards → jump to it
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![1, 0, 0]);
 }
 
 #[test]
-fn select_prev_turn_end_retreats_to_same_type_run_start() {
+fn select_prev_turn_end_clamps_at_first_turn() {
     let mut state = run_start_tree();
-    // Wrap in a two-turn tree so there is a "prev" turn to jump back from.
-    // Simplest: use a second tree where we set up selection at run-start already
-    // and verify the run-start end of the single turn.
-    state.selection_index = vec![0, 0, 0]; // user:rs — not at end
+    state.selection_index = vec![0, 0, 0]; // user:rs — before run-start end [0,1,0]
 
-    state.select_prev_turn_end(); // → agent:rs0 (run start of trailing AgentMessage run)
-    assert_eq!(sel(&state), vec![0, 1, 0]);
+    // [0,0,0] <= [0,1,0]: past end going backwards, but turn_idx=0 → no-op
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![0, 0, 0]);
 }
 
 #[test]
