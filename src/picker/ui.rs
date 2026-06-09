@@ -116,7 +116,14 @@ fn render_list(
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Start a new session", Style::default().fg(muted)),
+            Span::styled(
+                state
+                    .cwd
+                    .as_ref()
+                    .map(|p| format!("Workspace path: {}", p.display()))
+                    .unwrap_or_else(|| "Workspace path: (unknown)".to_string()),
+                Style::default().fg(muted),
+            ),
         ]),
         Line::default(),
     ])));
