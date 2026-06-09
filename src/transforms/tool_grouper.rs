@@ -50,7 +50,6 @@ pub struct ToolGrouper {
     allow_thinking: bool,
     /// Sealed containers for Remove propagation: container_id → child_ids.
     committed_groups: HashMap<String, HashSet<String>>,
-    counter: usize,
 }
 
 enum ActiveRun {
@@ -88,14 +87,7 @@ impl ToolGrouper {
                 buffer: vec![],
             },
             committed_groups: HashMap::new(),
-            counter: 0,
         }
-    }
-
-    fn next_container_id(&mut self) -> String {
-        let id = format!("tool_group:{}", self.counter);
-        self.counter += 1;
-        id
     }
 
     /// Returns `Some((group_idx, parent_id))` if the op is a ToolCall Append matching a
@@ -170,7 +162,7 @@ impl ToolGrouper {
         HashSet<String>,
         Vec<TreeOperation>,
     ) {
-        let container_id = self.next_container_id();
+        let container_id = format!("tool_group:{}", buffer[0].0);
         let mut ops: Vec<TreeOperation> = Vec::new();
 
         // Remove all buffered nodes after the first from the tree.
@@ -584,7 +576,6 @@ impl Transform for ToolGrouper {
             buffer: vec![],
         };
         self.committed_groups.clear();
-        self.counter = 0;
     }
 }
 
