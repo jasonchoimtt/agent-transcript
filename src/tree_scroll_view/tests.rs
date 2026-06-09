@@ -960,7 +960,8 @@ fn reset_snapshot_restores_show_more_on_replay() {
         .message_type(MessageType::AgentMessage)
         .text("hello")
         .show_more(true)
-        .expanded(false);
+        .expanded(false)
+        .dirty(true);
     let mut state = TreeScrollViewState::new(vec![msg]);
 
     // Reset: snapshot is taken, tree is cleared.
@@ -1012,11 +1013,13 @@ fn reset_snapshot_restores_flags_on_child_nodes() {
     let child = MessageState::new("c1")
         .message_type(MessageType::ToolResult)
         .text("result")
-        .hidden(crate::tree_scroll_view::HiddenState::Hidden);
+        .hidden(crate::tree_scroll_view::HiddenState::Hidden)
+        .dirty(true);
     let parent = MessageState::new("p1")
         .message_type(MessageType::ToolCall)
         .text("call")
         .expanded(false)
+        .dirty(true)
         .children(vec![child]);
     let mut state = TreeScrollViewState::new(vec![parent]);
 

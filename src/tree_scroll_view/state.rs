@@ -181,14 +181,16 @@ struct NodeUiFlags {
 
 fn capture_snapshot(items: &[MessageState], map: &mut HashMap<String, NodeUiFlags>) {
     for item in items {
-        map.insert(
-            item.id.clone(),
-            NodeUiFlags {
-                show_more: item.show_more,
-                expanded: item.expanded,
-                hidden: item.hidden,
-            },
-        );
+        if item.dirty {
+            map.insert(
+                item.id.clone(),
+                NodeUiFlags {
+                    show_more: item.show_more,
+                    expanded: item.expanded,
+                    hidden: item.hidden,
+                },
+            );
+        }
         capture_snapshot(&item.children, map);
     }
 }
@@ -200,6 +202,7 @@ fn apply_snapshot(node: &mut MessageState, snapshot: &HashMap<String, NodeUiFlag
         node.show_more = flags.show_more;
         node.expanded = flags.expanded;
         node.hidden = flags.hidden;
+        node.dirty = true;
     }
     for child in &mut node.children {
         apply_snapshot(child, snapshot);
@@ -232,6 +235,7 @@ fn reveal_all_hidden(items: &mut [MessageState]) {
         if node.hidden == HiddenState::Hidden {
             node.hidden = HiddenState::Revealed;
             node.height = None;
+            node.dirty = true;
         }
         reveal_all_hidden(&mut node.children);
     }
@@ -242,6 +246,7 @@ fn hide_all_revealed(items: &mut [MessageState]) {
         if node.hidden == HiddenState::Revealed {
             node.hidden = HiddenState::Hidden;
             node.height = None;
+            node.dirty = true;
         }
         hide_all_revealed(&mut node.children);
     }
@@ -263,6 +268,7 @@ fn reveal_n_hidden_forward(
         if let Some(node) = get_node_mut(items, &path) {
             node.hidden = HiddenState::Revealed;
             node.height = None;
+            node.dirty = true;
         }
     }
     last
@@ -284,6 +290,7 @@ fn reveal_n_hidden_backward(
         if let Some(node) = get_node_mut(items, &path) {
             node.hidden = HiddenState::Revealed;
             node.height = None;
+            node.dirty = true;
         }
     }
     first
@@ -407,6 +414,9 @@ pub struct MessageState {
     pub show_more: bool,
     pub expanded: bool,
     pub height: Option<u16>,
+    /// True when `hidden`, `show_more`, or `expanded` has been changed by a user-initiated action.
+    /// Only dirty nodes are included in the snapshot taken at `Reset` time.
+    pub dirty: bool,
 
     /// Rich widget state (e.g. `TableState`). Preserved across Replace/Update ops via
     /// `MessageComponent::on_update`.
@@ -434,6 +444,7 @@ impl MessageState {
             tag: None,
             timestamp: None,
             ui_state: None,
+            dirty: false,
         }
     }
 
@@ -511,6 +522,11 @@ impl MessageState {
         self.ui_state = Some(s);
         self
     }
+
+    pub fn dirty(mut self, v: bool) -> Self {
+        self.dirty = v;
+        self
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -586,6 +602,7 @@ fn make_terminal_node() -> MessageState {
         tag: None,
         timestamp: None,
         ui_state: None,
+        dirty: false,
     }
 }
 
@@ -1559,6 +1576,7 @@ impl TreeScrollViewState {
             let node = get_node_mut(&mut self.items, &sel_path).unwrap();
             node.expanded = true;
             node.height = None;
+            node.dirty = true;
             self.precedence = Precedence::Selection;
             return;
         }
@@ -1728,6 +1746,7 @@ impl TreeScrollViewState {
         if let Some(node) = get_node_mut(&mut self.items, path) {
             node.expanded = true;
             node.height = None;
+            node.dirty = true;
         }
     }
 
@@ -1736,6 +1755,7 @@ impl TreeScrollViewState {
         if let Some(node) = get_node_mut(&mut self.items, path) {
             node.expanded = false;
             node.height = None;
+            node.dirty = true;
         }
     }
 
@@ -1756,6 +1776,7 @@ impl TreeScrollViewState {
         if let Some(node) = get_node_mut(&mut self.items, &path) {
             node.show_more = !node.show_more;
             node.height = None;
+            node.dirty = true;
         }
     }
 
@@ -1789,25 +1810,30 @@ impl TreeScrollViewState {
                     // Step 1: reveal full text (only when there's actually more to show)
                     node.show_more = true;
                     node.height = None;
+                    node.dirty = true;
                 } else if !node.expanded && !node.children.is_empty() {
                     // Step 2: expand children
                     node.expanded = true;
                     node.height = None;
+                    node.dirty = true;
                 } else {
                     // Step 3: collapse back to compact
                     node.show_more = false;
                     node.expanded = false;
                     node.height = None;
+                    node.dirty = true;
                 }
             } else {
                 if !node.show_more {
                     // Inconsistent state, fix it
                     node.show_more = true;
                     node.height = None;
+                    node.dirty = true;
                 }
                 if !node.children.is_empty() {
                     node.expanded = !node.expanded;
                     node.height = None;
+                    node.dirty = true;
                 }
             }
         }
@@ -1818,6 +1844,7 @@ impl TreeScrollViewState {
         self.at_bottom = false;
         if let Some(node) = get_node_mut(&mut self.items, path) {
             node.hidden = hidden;
+            node.dirty = true;
         }
         self.rectify_selection_and_top();
     }
@@ -1843,10 +1870,12 @@ impl TreeScrollViewState {
         if let Some(node) = get_node_mut(&mut self.items, &path) {
             node.expanded = true;
             node.height = None;
+            node.dirty = true;
             for child in &mut node.children {
                 if child.hidden == HiddenState::Hidden {
                     child.hidden = HiddenState::Revealed;
                     child.height = None;
+                    child.dirty = true;
                 }
             }
         }
@@ -1860,10 +1889,12 @@ impl TreeScrollViewState {
         if let Some(node) = get_node_mut(&mut self.items, &path) {
             node.expanded = false;
             node.height = None;
+            node.dirty = true;
             for child in &mut node.children {
                 if child.hidden == HiddenState::Revealed {
                     child.hidden = HiddenState::Hidden;
                     child.height = None;
+                    child.dirty = true;
                 }
             }
         }
@@ -1925,6 +1956,7 @@ impl TreeScrollViewState {
             if let Some(node) = get_node_mut(&mut self.items, path) {
                 node.hidden = HiddenState::Revealed;
                 node.height = None;
+                node.dirty = true;
             }
         }
         // Jump to the first visible node AFTER the revealed run.
@@ -1947,6 +1979,7 @@ impl TreeScrollViewState {
             if let Some(node) = get_node_mut(&mut self.items, path) {
                 node.hidden = HiddenState::Revealed;
                 node.height = None;
+                node.dirty = true;
             }
         }
         let jump_from = revealed.first().unwrap_or(&start).clone();
