@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
@@ -17,9 +15,7 @@ impl App {
         match ev.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 if ev.kind == MouseEventKind::ScrollUp && self.mode == AppMode::Terminal {
-                    self.mode = AppMode::Normal;
-                    let _ = std::io::stdout().write_all(b"\x1b[0 q");
-                    let _ = std::io::stdout().flush();
+                    self.set_mode(AppMode::Normal);
                 }
                 let mut count = 1;
 
@@ -60,6 +56,7 @@ impl App {
 
             MouseEventKind::Moved => {
                 if self.mode == AppMode::Terminal && self.is_over_terminal(ev.column, ev.row) {
+                    self.tree_state.hover = None;
                     self.forward_mouse_to_pty(ev);
                 } else if self.is_over_prompt_overlay(ev.column, ev.row) {
                     // Overlay covers tree content — don't trigger hover on hidden messages.
@@ -100,7 +97,7 @@ impl App {
                     // Clicking outside the terminal exits terminal mode so that a
                     // subsequent click on the terminal pane activates rather than forwards.
                     if self.mode == AppMode::Terminal {
-                        self.mode = AppMode::Normal;
+                        self.set_mode(AppMode::Normal);
                     }
                     let in_dv = self
                         .data_view
@@ -163,7 +160,7 @@ impl App {
                         }
                     }
                 }
-                self.mode = AppMode::MessageInteraction;
+                self.set_mode(AppMode::MessageInteraction);
                 self.tree_state.enter_component_focus();
             }
             MouseHitResult::Message { path } => {
@@ -172,7 +169,7 @@ impl App {
                 } else {
                     self.tree_state.select_path(path);
                     if self.mode == AppMode::MessageInteraction {
-                        self.mode = AppMode::Normal;
+                        self.set_mode(AppMode::Normal);
                     }
                 }
             }
@@ -218,7 +215,8 @@ impl App {
     }
 
     fn is_over_prompt_overlay(&self, col: u16, row: u16) -> bool {
-        let Some((area_x, prompt_y, prompt_h, _)) = self.prompt_overlay_render_info else {
+        let Some((area_x, prompt_y, prompt_h, _)) = self.tree_state.prompt_overlay_render_info
+        else {
             return false;
         };
         col > area_x && row >= prompt_y && row < prompt_y + prompt_h

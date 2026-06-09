@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use ratatui::layout::Rect;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -59,7 +57,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.mode = AppMode::Confirm(ConfirmKind::SessionSwitch(entry));
+                    self.set_mode(AppMode::Confirm(ConfirmKind::SessionSwitch(entry)));
                 } else {
                     self.do_session_switch(entry).await;
                 }
@@ -72,7 +70,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.mode = AppMode::Confirm(ConfirmKind::SessionSwitchAndResume(entry));
+                    self.set_mode(AppMode::Confirm(ConfirmKind::SessionSwitchAndResume(entry)));
                 } else {
                     self.do_session_switch(entry).await;
                     self.try_launch_deferred_terminal();
@@ -87,7 +85,7 @@ impl App {
                 );
                 self.close_picker();
                 if needs_confirm {
-                    self.mode = AppMode::Confirm(ConfirmKind::NewSession(provider));
+                    self.set_mode(AppMode::Confirm(ConfirmKind::NewSession(provider)));
                 } else {
                     self.do_new_session(provider);
                 }
@@ -123,39 +121,35 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        let AppMode::SearchInput {
-            ref query,
-            backward,
-        } = self.mode
-        else {
-            return;
+        let (mut query, backward) = match &self.mode {
+            AppMode::SearchInput { query, backward } => (query.clone(), *backward),
+            _ => return,
         };
-        let (mut query, backward) = (query.clone(), backward);
 
         match key.code {
             KeyCode::Esc => {
                 self.active_tree_state_mut().cancel_search();
-                self.mode = AppMode::Normal;
+                self.set_mode(AppMode::Normal);
             }
             KeyCode::Enter => {
                 self.active_tree_state_mut().commit_search();
-                self.mode = AppMode::Normal;
+                self.set_mode(AppMode::Normal);
             }
             KeyCode::Backspace => {
                 query.pop();
-                self.mode = AppMode::SearchInput {
+                self.set_mode(AppMode::SearchInput {
                     query: query.clone(),
                     backward,
-                };
+                });
                 self.active_tree_state_mut()
                     .search_pending(&query, backward);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 query.push(c);
-                self.mode = AppMode::SearchInput {
+                self.set_mode(AppMode::SearchInput {
                     query: query.clone(),
                     backward,
-                };
+                });
                 self.active_tree_state_mut()
                     .search_pending(&query, backward);
             }
@@ -169,8 +163,7 @@ impl App {
     async fn handle_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                let AppMode::Confirm(kind) = std::mem::replace(&mut self.mode, AppMode::Normal)
-                else {
+                let AppMode::Confirm(kind) = self.set_mode(AppMode::Normal) else {
                     return;
                 };
                 match kind {
@@ -223,7 +216,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.mode = AppMode::Normal;
+                self.set_mode(AppMode::Normal);
             }
             _ => {}
         }
@@ -264,7 +257,7 @@ impl App {
         if self.tree_state.is_interaction_supported() {
             match self.tree_state.apply_component_key(key) {
                 ComponentKeyResult::ExitInteraction => {
-                    self.mode = AppMode::Normal;
+                    self.set_mode(AppMode::Normal);
                     self.tree_state.precedence =
                         crate::tree_scroll_view::state::Precedence::Selection;
                 }
@@ -288,10 +281,8 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             // Ctrl-O: deactivate terminal, also clear quit intent.
-            self.mode = AppMode::Normal;
+            self.set_mode(AppMode::Normal);
             self.quit_intent = false;
-            let _ = std::io::stdout().write_all(b"\x1b[0 q");
-            let _ = std::io::stdout().flush();
         } else if let Some(term) = self.terminal.live_ts() {
             let app_cursor = term.parser.screen().application_cursor();
             let app_keypad = term.parser.screen().application_keypad();
@@ -333,7 +324,7 @@ impl App {
                                 std::time::Instant::now(),
                             ));
                         } else {
-                            self.mode = AppMode::Confirm(ConfirmKind::DebugLog);
+                            self.set_mode(AppMode::Confirm(ConfirmKind::DebugLog));
                         }
                     }
                     KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -345,7 +336,7 @@ impl App {
                         if !key.modifiers.contains(KeyModifiers::CONTROL)
                             && self.last_session.is_some() =>
                     {
-                        self.mode = AppMode::Confirm(ConfirmKind::ReaderRestart);
+                        self.set_mode(AppMode::Confirm(ConfirmKind::ReaderRestart));
                     }
                     _ => {}
                 }
@@ -405,10 +396,10 @@ impl App {
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('/') {
             // /: enter forward search; push jump so Ctrl-T returns here.
             self.tree_state.push_jump();
-            self.mode = AppMode::SearchInput {
+            self.set_mode(AppMode::SearchInput {
                 query: String::new(),
                 backward: false,
-            };
+            });
             self.active_tree_state_mut().search_pending("", false);
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char(':') {
             // :: open key shortcuts view.
@@ -416,10 +407,10 @@ impl App {
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('?') {
             // ?: enter backward search; push jump so Ctrl-T returns here.
             self.tree_state.push_jump();
-            self.mode = AppMode::SearchInput {
+            self.set_mode(AppMode::SearchInput {
                 query: String::new(),
                 backward: true,
-            };
+            });
             self.active_tree_state_mut().search_pending("", true);
         } else if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('n')
@@ -441,7 +432,7 @@ impl App {
         {
             // Ctrl-K: kill confirmation (only when live).
             if self.terminal.is_live() {
-                self.mode = AppMode::Confirm(ConfirmKind::Kill);
+                self.set_mode(AppMode::Confirm(ConfirmKind::Kill));
             }
         } else {
             let action = self
@@ -479,7 +470,7 @@ impl App {
             }
             // Interactive component (e.g. table): Enter enters message interaction mode.
             TreeAction::ToggleExpand if self.tree_state.is_interaction_supported() => {
-                self.mode = AppMode::MessageInteraction;
+                self.set_mode(AppMode::MessageInteraction);
                 self.tree_state.enter_component_focus();
             }
             // Terminal node overrides: Enter toggle the PTY pane.

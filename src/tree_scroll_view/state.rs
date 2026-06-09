@@ -546,6 +546,9 @@ pub struct TreeScrollViewState {
     /// Screen position of the terminal widget from the last render: (x, y, area_height, skip).
     /// Set by TreeScrollView::render; used by app.rs to place the PTY cursor.
     pub terminal_render_info: Option<(u16, u16, u16, u16)>,
+    /// Geometry of the prompt overlay from the last render, used for mouse translation.
+    /// `(area_x, prompt_rows_y, prompt_height, pty_prompt_start_row)` — `None` when hidden.
+    pub prompt_overlay_render_info: Option<(u16, u16, u16, u16)>,
     /// Per-message render rectangles from the last render pass, used for mouse hit-testing.
     pub render_rects: Vec<MessageRenderInfo>,
     /// Current mouse hover state; updated on every MouseMoved event.
@@ -613,6 +616,7 @@ impl TreeScrollViewState {
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
             terminal_render_info: None,
+            prompt_overlay_render_info: None,
             render_rects: vec![],
             hover: None,
             theme: Theme::default_dark(),
@@ -1583,6 +1587,10 @@ impl TreeScrollViewState {
         self.precedence = Precedence::Selection;
     }
 
+    pub fn clear_hover(&mut self) {
+        self.hover = None;
+    }
+
     // ── scrolling ─────────────────────────────────────────────────────────────
 
     pub fn scroll_down(&mut self, lines: u16) {
@@ -2390,6 +2398,7 @@ impl TreeScrollViewState {
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
             terminal_render_info: None,
+            prompt_overlay_render_info: None,
             render_rects: vec![],
             hover: None,
             theme: Theme::default_dark(),

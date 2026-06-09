@@ -55,6 +55,7 @@ fn render_once(state: &mut TreeScrollViewState, width: u16, height: u16) {
                 terminal_active: false,
                 theme: &theme,
                 message_interaction: false,
+                prompt_pinned: false,
             },
             f.area(),
             state,

@@ -117,10 +117,6 @@ pub struct App {
     /// When true, the prompt box overlay is permanently pinned at the bottom of the viewport
     /// even when the terminal does not have focus.
     pub(super) prompt_pinned: bool,
-    /// Geometry of the prompt overlay set after each draw(), used for mouse translation.
-    /// `(area_x, prompt_rows_y, prompt_height, pty_prompt_start_row)`
-    /// `None` when no overlay is visible.
-    pub(super) prompt_overlay_render_info: Option<(u16, u16, u16, u16)>,
 }
 
 impl App {
@@ -159,7 +155,6 @@ impl App {
             debug_writer,
             pending_app_key: None,
             prompt_pinned: false,
-            prompt_overlay_render_info: None,
         };
 
         match start_mode {
@@ -433,10 +428,12 @@ impl App {
         if self.terminal.is_live() {
             self.terminal.transition_to_exited(code);
             if self.mode == AppMode::Terminal {
-                self.mode = AppMode::Normal;
+                self.set_mode(AppMode::Normal);
+            } else {
+                // Terminal exited while not in Terminal mode — still reset cursor as a safety measure.
+                let _ = std::io::stdout().write_all(b"\x1b[0 q");
+                let _ = std::io::stdout().flush();
             }
-            let _ = std::io::stdout().write_all(b"\x1b[0 q");
-            let _ = std::io::stdout().flush();
         }
         if self.quit_intent {
             self.running = false;
@@ -500,8 +497,7 @@ impl App {
     fn activate_terminal(&mut self) {
         self.tree_state.key_parser.reset();
         self.tree_state.select_terminal_node();
-        self.mode = AppMode::Terminal;
-        self.terminal.apply_cursor_shape();
+        self.set_mode(AppMode::Terminal);
     }
 
     /// Translate a mouse event into PTY coordinates for the prompt overlay.
@@ -510,7 +506,8 @@ impl App {
         &self,
         ev: crossterm::event::MouseEvent,
     ) -> Option<crossterm::event::MouseEvent> {
-        let (area_x, prompt_y, prompt_h, pty_start_row) = self.prompt_overlay_render_info?;
+        let (area_x, prompt_y, prompt_h, pty_start_row) =
+            self.tree_state.prompt_overlay_render_info?;
         // Col 0 is the selection gutter; PTY content starts at area_x + 1.
         let pty_col = ev.column.checked_sub(area_x + 1)?;
         let pane_i = ev.row.checked_sub(prompt_y)?;
@@ -529,8 +526,29 @@ impl App {
     /// keeps their current position while the prompt box appears as an overlay.
     fn activate_terminal_floating(&mut self) {
         self.tree_state.key_parser.reset();
-        self.mode = AppMode::Terminal;
-        self.terminal.apply_cursor_shape();
+        self.set_mode(AppMode::Terminal);
+    }
+
+    /// Set the input-routing mode, applying cursor side effects:
+    /// - entering Terminal: forwards the PTY cursor shape to the host terminal
+    /// - leaving Terminal: resets the host cursor to the default block shape
+    ///
+    /// Returns the previous mode.
+    fn set_mode(&mut self, new_mode: AppMode) -> AppMode {
+        let old = std::mem::replace(&mut self.mode, new_mode);
+        let terminal_active = matches!(self.mode, AppMode::Terminal);
+        if matches!(old, AppMode::Terminal) && !terminal_active {
+            let _ = std::io::stdout().write_all(b"\x1b[0 q");
+            let _ = std::io::stdout().flush();
+        }
+        if terminal_active {
+            self.terminal.apply_cursor_shape();
+        }
+        self.terminal.set_active(terminal_active);
+        if matches!(old, AppMode::Normal) && !matches!(self.mode, AppMode::Normal) {
+            self.tree_state.clear_hover();
+        }
+        old
     }
 
     /// Perform a session switch to `entry` unconditionally.
@@ -561,7 +579,7 @@ impl App {
             expanded: false,
         };
         self.load_marks();
-        self.mode = AppMode::Normal;
+        self.set_mode(AppMode::Normal);
         self.transcript_open = true;
         self.screen = AppScreen::Transcript;
     }
@@ -938,10 +956,10 @@ mod tests {
         let mut app = picker_app().await;
         app.terminal = sh_live_panel(&app);
         app.quit_intent = true;
-        app.mode = AppMode::Terminal;
+        app.set_mode(AppMode::Terminal);
 
         // Simulate Ctrl-O: deactivate and clear quit intent.
-        app.mode = AppMode::Normal;
+        app.set_mode(AppMode::Normal);
         app.quit_intent = false;
 
         assert!(!app.quit_intent);

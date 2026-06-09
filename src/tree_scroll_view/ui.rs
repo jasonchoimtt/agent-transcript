@@ -1,12 +1,14 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::widgets::{StatefulWidget, Widget};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Clear, StatefulWidget, Widget};
 
 use super::cursor::TreeCursor;
 use super::message_widget::MessageWidget;
 use super::predicates::nonzero_height;
 use super::state::{MessageRenderInfo, Precedence, TreeScrollViewState, get_node, get_node_mut};
-use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
+use crate::terminal::crop::CollapsedCrop;
+use crate::terminal::pane_ref::TerminalPaneRef;
 use crate::terminal::placeholder::PlaceholderWidget;
 use crate::terminal::ui::TerminalWidget;
 use crate::theme::Theme;
@@ -31,6 +33,8 @@ pub struct TreeScrollView<'a> {
     pub theme: &'a Theme,
     /// True when message-interaction mode is active (keys routed to selected widget).
     pub message_interaction: bool,
+    /// When true, the prompt overlay is pinned even when the terminal is not active.
+    pub prompt_pinned: bool,
 }
 
 impl StatefulWidget for TreeScrollView<'_> {
@@ -80,6 +84,26 @@ impl StatefulWidget for TreeScrollView<'_> {
             .map(|n| n.group)
             .unwrap_or(false);
 
+        // Pre-compute the overlay plan before the loop so both the inline-terminal height
+        // clip and the overlay rendering share a single evaluation of the show condition.
+        // `Some((pbsr, crop, prompt_h))` means the overlay will be drawn.
+        let overlay_plan: Option<(u16, CollapsedCrop, u16)> = if let TerminalPaneRef::Live(ts) =
+            &self.terminal
+        {
+            if let (Some(pbsr), Some(crop)) = (ts.prompt_box_start_row, ts.collapsed_crop) {
+                let prompt_h = (crop.start_row + crop.height).saturating_sub(pbsr);
+                if prompt_h > 0 && (self.prompt_pinned || (!state.at_bottom && terminal_active)) {
+                    Some((pbsr, crop, prompt_h))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         state.terminal_render_info = None;
         state.render_rects.clear();
         let mut y = area.top();
@@ -122,36 +146,45 @@ impl StatefulWidget for TreeScrollView<'_> {
                 if is_terminal {
                     state.terminal_render_info =
                         Some((widget_area.x, widget_area.y, widget_area.height, skip));
-                    // Move the pane ref out of self; the sentinel is never observed because
-                    // the terminal node appears at most once per tree.
-                    match std::mem::replace(
-                        &mut self.terminal,
-                        TerminalPaneRef::Placeholder(PlaceholderInfo {
-                            provider_name: "",
-                            session_id: None,
-                            directory: None,
-                            exit_code: None,
-                        }),
-                    ) {
-                        TerminalPaneRef::Live(term) => {
+
+                    // Clip the inline terminal height to exclude PTY rows that the prompt
+                    // overlay will draw, preventing a double-render of those rows.
+                    let draw_height = if let Some((pbsr, crop, _)) = overlay_plan {
+                        // First block_row (render_offset-space) that maps to pbsr.
+                        let first_excluded: i32 = if terminal_expanded {
+                            scrollback_available as i32 + pbsr as i32
+                        } else {
+                            pbsr as i32 - crop.start_row as i32
+                        };
+                        (first_excluded - skip as i32).clamp(0, visible_rows as i32) as u16
+                    } else {
+                        visible_rows
+                    };
+
+                    let draw_area = Rect {
+                        height: draw_height,
+                        ..widget_area
+                    };
+                    match &mut self.terminal {
+                        TerminalPaneRef::Live(ts) => {
                             TerminalWidget::new_scroll(
-                                term,
+                                ts,
                                 terminal_expanded,
                                 selected,
                                 terminal_active,
                                 skip,
                                 scrollback_available,
                             )
-                            .render(widget_area, buf);
+                            .render(draw_area, buf);
                         }
                         TerminalPaneRef::Placeholder(info) => {
                             PlaceholderWidget {
-                                info: &info,
+                                info,
                                 selected,
                                 primary: self.theme.palette.primary,
                                 muted: self.theme.palette.muted,
                             }
-                            .render(widget_area, buf);
+                            .render(draw_area, buf);
                         }
                     }
                 } else {
@@ -204,6 +237,7 @@ impl StatefulWidget for TreeScrollView<'_> {
                         mark,
                         hovered,
                         hover_target,
+                        terminal_active,
                     }
                     .render(widget_area, buf);
 
@@ -248,5 +282,66 @@ impl StatefulWidget for TreeScrollView<'_> {
 
         // 5. Update at_bottom flag after rendering.
         state.update_at_bottom();
+
+        // 6. Prompt overlay — drawn on top of the tree when scrolled above bottom while
+        //    the terminal is active or pinned.
+        if let Some((pbsr, crop, prompt_h)) = overlay_plan {
+            let overlay_height = (prompt_h + 2).min(area.height); // +1 divider row, +1 bottom padding row
+            let oa_y = area
+                .y
+                .saturating_add(area.height)
+                .saturating_sub(overlay_height);
+            state.prompt_overlay_render_info = Some((area.x, oa_y + 1, prompt_h, pbsr));
+            let oa = Rect {
+                y: oa_y,
+                height: overlay_height,
+                ..area
+            };
+            Clear.render(oa, buf);
+            render_prompt_divider(
+                Rect { height: 1, ..oa },
+                buf,
+                self.prompt_pinned,
+                self.theme,
+            );
+            if let TerminalPaneRef::Live(ts) = &mut self.terminal {
+                let prompt_block_offset = pbsr.saturating_sub(crop.start_row);
+                let terminal_y = oa.y + 1;
+                let terminal_h = (prompt_h + 1).min(area.bottom().saturating_sub(terminal_y));
+                TerminalWidget::new_scroll(
+                    ts,
+                    false,
+                    false,
+                    terminal_active,
+                    prompt_block_offset,
+                    0,
+                )
+                .render(
+                    Rect {
+                        y: terminal_y,
+                        height: terminal_h,
+                        ..oa
+                    },
+                    buf,
+                );
+            }
+        } else {
+            state.prompt_overlay_render_info = None;
+        }
+    }
+}
+
+fn render_prompt_divider(area: Rect, buf: &mut Buffer, pinned: bool, theme: &Theme) {
+    let style = if pinned {
+        Style::default().fg(theme.palette.fg)
+    } else {
+        Style::default()
+            .fg(theme.palette.fg)
+            .add_modifier(Modifier::DIM)
+    };
+    for x in area.left()..area.right() {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            cell.set_symbol("─").set_style(style);
+        }
     }
 }

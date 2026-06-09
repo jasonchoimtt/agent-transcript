@@ -52,6 +52,10 @@ pub struct TerminalState {
     pub cursor_shape: u8,
     pub sync_locked: bool,
     pub sync_lock_deadline: Option<Instant>,
+    /// True when the terminal pane has keyboard focus (AppMode::Terminal).
+    pub is_active: bool,
+    /// True when the host terminal window has OS focus.
+    host_focused: bool,
 
     crop_detector: Box<dyn CropDetector>,
     /// Most-recently computed crop region for the collapsed terminal view.
@@ -158,6 +162,8 @@ impl TerminalState {
             cursor_shape: 0,
             sync_locked: false,
             sync_lock_deadline: None,
+            is_active: false,
+            host_focused: true,
             crop_detector,
             collapsed_crop: None,
             collapsed_crop_is_alt_screen: false,
@@ -182,12 +188,14 @@ impl TerminalState {
                 }
             }
             crossterm::event::Event::FocusGained => {
-                if self.focus_events {
+                self.host_focused = true;
+                if self.focus_events && self.is_active {
                     self.write_input(b"\x1b[I");
                 }
             }
             crossterm::event::Event::FocusLost => {
-                if self.focus_events {
+                self.host_focused = false;
+                if self.focus_events && self.is_active {
                     self.write_input(b"\x1b[O");
                 }
             }
@@ -256,6 +264,25 @@ impl TerminalState {
         let seq = format!("\x1b[{n} q");
         let _ = std::io::stdout().write_all(seq.as_bytes());
         let _ = std::io::stdout().flush();
+    }
+
+    /// Notify the PTY that the terminal pane has gained or lost keyboard focus.
+    ///
+    /// Sends `\x1b[I` (focus-in) only when both this pane is active *and* the host
+    /// terminal window has OS focus. Sends `\x1b[O` (focus-out) whenever the pane
+    /// loses focus, regardless of host focus state.
+    pub fn set_active(&mut self, active: bool) {
+        if self.is_active == active {
+            return;
+        }
+        self.is_active = active;
+        if self.focus_events {
+            if active && self.host_focused {
+                self.write_input(b"\x1b[I");
+            } else if !active {
+                self.write_input(b"\x1b[O");
+            }
+        }
     }
 
     pub fn on_tick(&mut self) {

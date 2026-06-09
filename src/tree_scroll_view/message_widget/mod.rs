@@ -82,6 +82,8 @@ pub struct MessageWidget<'a> {
     pub hovered: bool,
     /// Which sub-region of this node the cursor is over (only meaningful when hovered).
     pub hover_target: Option<&'a HoverTarget>,
+    /// True when the embedded terminal pane has keyboard focus; suppresses the selection gutter.
+    pub terminal_active: bool,
 }
 
 impl MessageWidget<'_> {
@@ -110,12 +112,14 @@ impl Widget for MessageWidget<'_> {
             return;
         }
 
-        let gutter_color = if self.selected {
+        let gutter_color = if self.hovered {
+            Some(self.palette.muted)
+        } else if self.terminal_active {
+            None
+        } else if self.selected {
             Some(self.palette.resolve(&ColorVar::Primary))
         } else if self.group_descent {
             Some(self.palette.resolve(&ColorVar::PrimaryLight))
-        } else if self.hovered {
-            Some(self.palette.muted)
         } else {
             None
         };

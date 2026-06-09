@@ -235,6 +235,13 @@ impl TerminalPanel {
         }
     }
 
+    /// Notify the PTY that the terminal pane gained or lost keyboard focus.
+    pub fn set_active(&mut self, active: bool) {
+        if let PanelState::Live { ts: term, .. } = &mut self.state {
+            term.set_active(active);
+        }
+    }
+
     /// Called on each tick: flushes pending PTY resizes and expires a stale sync lock.
     pub fn on_tick(&mut self) {
         if let PanelState::Live { ts: term, .. } = &mut self.state {

@@ -41,6 +41,7 @@ impl StatefulWidget for DataViewUi<'_> {
             terminal_active: false,
             theme: self.theme,
             message_interaction: false,
+            prompt_pinned: false,
         }
         .render(inner, buf, &mut state.tree);
     }
