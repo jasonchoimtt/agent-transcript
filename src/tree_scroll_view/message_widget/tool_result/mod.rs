@@ -294,7 +294,7 @@ pub fn build_diff_lines(
                     }
                 }
                 _ => {
-                    let h = std::mem::replace(&mut hunk, None);
+                    let h = hunk.take();
                     if let Some(h) = h {
                         hunks.push(h);
                     }
@@ -302,7 +302,7 @@ pub fn build_diff_lines(
             }
         }
         {
-            let h = std::mem::replace(&mut hunk, None);
+            let h = hunk.take();
             if let Some(h) = h {
                 hunks.push(h);
             }

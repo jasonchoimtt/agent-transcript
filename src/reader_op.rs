@@ -6,6 +6,7 @@ use crate::tree_operation::TreeOperation;
 /// `TreeOperation` covers pure tree mutations (Append/Replace/Remove/Update).
 /// `ReaderOp` wraps those and adds the reset lifecycle variants, which the
 /// pipeline handles specially — transforms never see `Reset` or `ResetDone`.
+#[allow(clippy::large_enum_variant)]
 pub enum ReaderOp {
     /// A pure tree mutation; forwarded to the transform pipeline as-is.
     Tree(TreeOperation),

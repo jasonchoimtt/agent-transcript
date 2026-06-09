@@ -93,7 +93,7 @@ impl MessagePath {
     }
 
     pub fn forward(&mut self, node: &MessageNode) -> ForwardPathResult {
-        let result = match node.parent_uuid {
+        match node.parent_uuid {
             Some(p) if !p.is_empty() => {
                 if node.is_tool_result {
                     if self.is_dangling(p) {
@@ -152,8 +152,7 @@ impl MessagePath {
                     ForwardPathResult::Drop
                 }
             }
-        };
-        result
+        }
     }
 
     pub fn reset(&mut self) {

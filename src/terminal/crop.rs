@@ -78,9 +78,7 @@ impl CropDetector for ClaudeCropDetector {
         let mut tokenizer = LineTokenizer::new(screen);
         let end_row = tokenizer.peek(LineMatcher::NonBlank).unwrap_or(0);
 
-        let Some(bottom_divider) = tokenizer.take_until(LineMatcher::Divider) else {
-            return None;
-        };
+        let bottom_divider = tokenizer.take_until(LineMatcher::Divider)?;
 
         let top_divider = tokenizer.take_until(LineMatcher::Divider);
 
@@ -147,7 +145,7 @@ fn find_cursor_divider_crop(screen: &vt100::Screen) -> Option<CollapsedCrop> {
     let bottommost_divider = tokenizer.peek(LineMatcher::Divider);
 
     // Try divider-flanked title
-    while let Some(_) = tokenizer.take_until(LineMatcher::Divider) {
+    while tokenizer.take_until(LineMatcher::Divider).is_some() {
         let Some(_) = tokenizer.take(LineMatcher::NonBlank) else {
             continue;
         };
@@ -193,10 +191,10 @@ impl CropDetector for CursorCropDetector {
             }
 
             // Include any braille status line
-            if let Some((para_start, _)) = tokenizer.peek_paragraph() {
-                if tokenizer.is_at(para_start, LineMatcher::Braille) {
-                    tokenizer.seek(para_start);
-                }
+            if let Some((para_start, _)) = tokenizer.peek_paragraph()
+                && tokenizer.is_at(para_start, LineMatcher::Braille)
+            {
+                tokenizer.seek(para_start);
             }
 
             // Include any prompt box immediately above

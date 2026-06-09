@@ -86,21 +86,21 @@ impl MarkdownSplitter {
 
         for i in new_paragraphs.len()..record.count {
             output.push(TreeOperation::Remove {
-                id: get_para_id(&id, i),
+                id: get_para_id(id, i),
             });
         }
 
         for (abs_i, new_text_slice) in new_paragraphs.iter().enumerate().skip(common) {
             output.push(TreeOperation::Replace {
-                id: get_para_id(&id, abs_i),
-                message: build_para(&id, abs_i, new_text_slice),
+                id: get_para_id(id, abs_i),
+                message: build_para(id, abs_i, new_text_slice),
             });
         }
 
         for (abs_i, new_text_slice) in new_paragraphs.iter().enumerate().skip(record.count) {
             output.push(TreeOperation::Append {
                 parent_id: Some(container_id.clone()),
-                message: build_para(&id, abs_i, new_text_slice),
+                message: build_para(id, abs_i, new_text_slice),
             });
         }
 

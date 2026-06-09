@@ -135,7 +135,6 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
         };
         let id_part = format!("  {}", format!("id={}", node.id).dark_grey());
         let ui_part = ui_state_name
-            .as_deref()
             .map(|n| format!("  {}", format!("ui={n}").cyan()))
             .unwrap_or_default();
         let brief_part = node
@@ -168,7 +167,6 @@ fn print_node(node: &MessageState, depth: usize, color: bool) {
             format!("  [{}]", flags.join(", "))
         };
         let ui_str = ui_state_name
-            .as_deref()
             .map(|n| format!("  ui={n}"))
             .unwrap_or_default();
         let brief_str = node

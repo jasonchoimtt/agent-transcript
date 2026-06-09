@@ -780,19 +780,19 @@ impl TreeScrollViewState {
                 ref id,
                 mut message,
             } => {
-                if let Some(path) = self.id_to_path.get(id).cloned() {
-                    if let Some(node) = get_node_mut(&mut self.items, &path) {
-                        let existing_children = std::mem::take(&mut node.children);
-                        let merged_ui = node
-                            .ui_state
-                            .as_ref()
-                            .and_then(|s| s.on_update(&message))
-                            .or_else(|| message.ui_state.take());
-                        *node = message;
-                        node.children = existing_children;
-                        node.ui_state = merged_ui;
-                        clear_heights(std::slice::from_mut(node));
-                    }
+                if let Some(path) = self.id_to_path.get(id).cloned()
+                    && let Some(node) = get_node_mut(&mut self.items, &path)
+                {
+                    let existing_children = std::mem::take(&mut node.children);
+                    let merged_ui = node
+                        .ui_state
+                        .as_ref()
+                        .and_then(|s| s.on_update(&message))
+                        .or_else(|| message.ui_state.take());
+                    *node = message;
+                    node.children = existing_children;
+                    node.ui_state = merged_ui;
+                    clear_heights(std::slice::from_mut(node));
                 }
             }
             TreeOperation::Remove { ref id } => {
@@ -1020,7 +1020,7 @@ impl TreeScrollViewState {
         let path = self.selection_index.clone();
         let palette = &self.theme.palette;
         if let Some(line_range) = get_node_mut(&mut self.items, &path)
-            .and_then(|n| get_message_component(n))
+            .and_then(get_message_component)
             .and_then(|s| s.focused_line_range(palette))
         {
             self.precedence = Precedence::InnerFocus { path, line_range };

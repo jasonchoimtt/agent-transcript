@@ -124,7 +124,7 @@ impl ClaudeSubagentManager {
         subagent.tool_use_id = Some(tool_use_id.to_string());
         info!(%agent_id, %tool_use_id, "resolved waiting subagent watcher via on_subagent_tool_result");
 
-        self.read_subagent_jsonl(&agent_id)
+        self.read_subagent_jsonl(agent_id)
     }
 
     /// Dispatch a sub-agent file event (meta.json or agent JSONL).
@@ -175,7 +175,7 @@ impl ClaudeSubagentManager {
         let subagent = self.subagents.get_mut(agent_id).unwrap();
 
         if subagent.description.is_none() {
-            subagent.description = std::fs::read_to_string(&path)
+            subagent.description = std::fs::read_to_string(path)
                 .ok()
                 .and_then(|meta_text| serde_json::from_str::<serde_json::Value>(&meta_text).ok())
                 .and_then(|meta_obj| meta_obj["description"].as_str().map(|s| s.to_string()));
@@ -187,17 +187,14 @@ impl ClaudeSubagentManager {
         if subagent.tool_use_id.is_none()
             && let Some(ref description) = subagent.description
         {
-            subagent.tool_use_id = self
-                .tool_uses_by_description
-                .get(description)
-                .map(|d| d.clone());
+            subagent.tool_use_id = self.tool_uses_by_description.get(description).cloned();
             if let Some(ref tool_use_id) = subagent.tool_use_id {
                 info!("subagent {agent_id} matched with tool use {tool_use_id}");
             }
         }
 
         if subagent.tool_use_id.is_none() {
-            subagent.tool_use_id = self.tool_uses_by_agent_id.get(agent_id).map(|d| d.clone());
+            subagent.tool_use_id = self.tool_uses_by_agent_id.get(agent_id).cloned();
             if let Some(ref tool_use_id) = subagent.tool_use_id {
                 info!("subagent {agent_id} matched with tool use {tool_use_id}");
             }

@@ -156,13 +156,12 @@ impl ClaudeReader {
                 notify::Config::default(),
             )
             .ok();
-            if let Some(ref mut sw_ref) = sw {
-                if sw_ref
+            if let Some(ref mut sw_ref) = sw
+                && sw_ref
                     .watch(&sa_watched_dir, notify::RecursiveMode::Recursive)
                     .is_ok()
-                {
-                    info!(dir = %sa_watched_dir.display(), "watching for sub-agent files");
-                }
+            {
+                info!(dir = %sa_watched_dir.display(), "watching for sub-agent files");
             }
             sw
         };
@@ -238,7 +237,7 @@ impl ClaudeReader {
             let byte_offset = bytes_consumed;
             bytes_consumed += line_byte_len;
 
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 continue;
             }
@@ -279,10 +278,9 @@ impl ClaudeReader {
                         &mut self.state,
                         |tu_id, value, is_result| {
                             if is_result {
-                                self.subagent_manager
-                                    .on_subagent_tool_result(&tu_id, &value)
+                                self.subagent_manager.on_subagent_tool_result(tu_id, value)
                             } else {
-                                self.subagent_manager.on_subagent_tool_use(&tu_id, &value)
+                                self.subagent_manager.on_subagent_tool_use(tu_id, value)
                             }
                         },
                     )?);
@@ -316,7 +314,7 @@ impl ClaudeReader {
         reader.seek(SeekFrom::Start(self.byte_offset as u64))?;
 
         let mut new_ops: Vec<ReaderOp> = Vec::new();
-        let mut cur_offset = self.byte_offset as usize;
+        let mut cur_offset = self.byte_offset;
         let mut rewind_detected = false;
         let mut rewind_id: Option<String> = None;
 
@@ -329,7 +327,7 @@ impl ClaudeReader {
                 break;
             }
 
-            let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 cur_offset += line_byte_len;
                 continue;
@@ -364,10 +362,9 @@ impl ClaudeReader {
                     new_ops.extend(
                         parse_entry_cb(line.trim(), &mut self.state, |tu_id, value, is_result| {
                             if is_result {
-                                self.subagent_manager
-                                    .on_subagent_tool_result(&tu_id, &value)
+                                self.subagent_manager.on_subagent_tool_result(tu_id, value)
                             } else {
-                                self.subagent_manager.on_subagent_tool_use(&tu_id, &value)
+                                self.subagent_manager.on_subagent_tool_use(tu_id, value)
                             }
                         })?
                         .into_iter()
@@ -411,7 +408,7 @@ impl ClaudeReader {
                 Err(e) => warn!("re-read after rewind error: {}", e),
             }
         } else {
-            if self.waterfall && cur_offset > self.byte_offset as usize {
+            if self.waterfall && cur_offset > self.byte_offset {
                 self.waterfall_message_limit = self.waterfall_message_limit.saturating_add(1);
             }
             self.byte_offset = cur_offset;
@@ -503,15 +500,15 @@ impl ClaudeReader {
                     // If we're watching jsonl_dir (because session_dir didn't exist at startup)
                     // and an event under session_dir arrives, upgrade to watching session_dir.
                     let session_dir = self.jsonl_path.with_extension("");
-                    if self.sa_watched_dir != session_dir && path.starts_with(&session_dir) {
-                        if let Some(ref mut watcher) = self.sa_watcher {
-                            // Must unwatch first; seems unwatch would apply to
-                            // descendant watches too
-                            let _ = watcher.unwatch(&self.sa_watched_dir);
-                            if watcher.watch(&session_dir, notify::RecursiveMode::Recursive).is_ok() {
-                                info!(dir = %session_dir.display(), "upgraded SA watcher to session_dir");
-                                self.sa_watched_dir = session_dir;
-                            }
+                    if self.sa_watched_dir != session_dir && path.starts_with(&session_dir)
+                        && let Some(ref mut watcher) = self.sa_watcher
+                    {
+                        // Must unwatch first; seems unwatch would apply to
+                        // descendant watches too
+                        let _ = watcher.unwatch(&self.sa_watched_dir);
+                        if watcher.watch(&session_dir, notify::RecursiveMode::Recursive).is_ok() {
+                            info!(dir = %session_dir.display(), "upgraded SA watcher to session_dir");
+                            self.sa_watched_dir = session_dir;
                         }
                     }
                     for op in self.subagent_manager.on_subagent_event(path)? {
@@ -537,12 +534,12 @@ fn value_to_message_node(obj: &serde_json::Value, byte_offset: usize) -> Option<
         .as_array()
         .is_some_and(|a| a.iter().any(|b| b["type"].as_str() == Some("tool_result")));
 
-    return Some(MessageNode {
+    Some(MessageNode {
         uuid,
         parent_uuid,
         is_tool_result,
         byte_offset,
-    });
+    })
 }
 
 pub(super) async fn claude_reader_task(

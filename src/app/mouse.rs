@@ -143,22 +143,19 @@ impl App {
                     } else {
                         None
                     }
-                }) {
-                    if let Some(node) = get_node_mut(&mut self.tree_state.items, &path) {
-                        if let Some(ts) = node
-                            .ui_state
-                            .as_mut()
-                            .and_then(|s| s.as_any_mut().downcast_mut::<TableState>())
-                        {
-                            ts.selected_row = if display_row == 0 {
-                                None
-                            } else {
-                                Some(display_row - 1)
-                            };
-                            ts.selected_col = col_idx;
-                            ts.clamp_scroll();
-                        }
-                    }
+                }) && let Some(node) = get_node_mut(&mut self.tree_state.items, &path)
+                    && let Some(ts) = node
+                        .ui_state
+                        .as_mut()
+                        .and_then(|s| s.as_any_mut().downcast_mut::<TableState>())
+                {
+                    ts.selected_row = if display_row == 0 {
+                        None
+                    } else {
+                        Some(display_row - 1)
+                    };
+                    ts.selected_col = col_idx;
+                    ts.clamp_scroll();
                 }
                 self.set_mode(AppMode::MessageInteraction);
                 self.tree_state.enter_component_focus();
@@ -205,11 +202,13 @@ impl App {
     }
 
     fn is_over_terminal(&self, col: u16, row: u16) -> bool {
-        if let Some((tx, ty, th, _)) = self.tree_state.terminal_render_info {
-            if col >= tx && col < tx + self.tree_state.viewport_width && row >= ty && row < ty + th
-            {
-                return true;
-            }
+        if let Some((tx, ty, th, _)) = self.tree_state.terminal_render_info
+            && col >= tx
+            && col < tx + self.tree_state.viewport_width
+            && row >= ty
+            && row < ty + th
+        {
+            return true;
         }
         self.is_over_prompt_overlay(col, row)
     }

@@ -96,12 +96,12 @@ impl ToolResultEnricher {
 
         let mut hunks: Vec<PatchHunk> = patch_arr.iter().filter_map(parse_hunk).collect();
 
-        if hunks.is_empty() && result.get("type").and_then(|v| v.as_str()) == Some("create") {
-            if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
-                if !content.is_empty() {
-                    hunks = vec![make_create_hunk(content)];
-                }
-            }
+        if hunks.is_empty()
+            && result.get("type").and_then(|v| v.as_str()) == Some("create")
+            && let Some(content) = result.get("content").and_then(|v| v.as_str())
+            && !content.is_empty()
+        {
+            hunks = vec![make_create_hunk(content)];
         }
 
         if hunks.is_empty() {

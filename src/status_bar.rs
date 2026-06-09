@@ -157,6 +157,7 @@ impl StatusBar<'_> {
     }
 
     /// Returns raw `(key, description)` pairs for the left and optional right hint regions.
+    #[allow(clippy::type_complexity)]
     fn hint_pairs(
         &self,
     ) -> (

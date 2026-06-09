@@ -269,10 +269,10 @@ impl<'a> LineTokenizer<'a> {
         let threshold = self.cols as f32 * 0.8;
         let mut count = 0u16;
         for col in 0..self.cols {
-            if let Some(cell) = self.screen.cell(row, col) {
-                if cell.bgcolor() != vt100::Color::Default {
-                    count += 1;
-                }
+            if let Some(cell) = self.screen.cell(row, col)
+                && cell.bgcolor() != vt100::Color::Default
+            {
+                count += 1;
             }
             let remaining = self.cols - col - 1;
             if ((count + remaining) as f32) < threshold {
