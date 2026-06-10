@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal as _, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -87,26 +87,43 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Filter<S> for ToggleFilt
     }
 }
 
-pub fn init_tracing(debug: bool, log_buffer: LogBuffer) -> color_eyre::Result<DebugHandle> {
+pub fn init_tracing(
+    debug: bool,
+    log_buffer: LogBuffer,
+    log_to_stderr: bool,
+) -> color_eyre::Result<DebugHandle> {
     let handle = DebugHandle::default();
 
-    if debug {
+    if log_to_stderr {
+        // Parse mode: no TUI, so stderr is available. Write directly there.
         handle
-            .enable()
-            .map_err(|e| color_eyre::eyre::eyre!("failed to open log file: {e}"))?;
+            .enabled
+            .store(debug, std::sync::atomic::Ordering::Release);
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(std::io::stderr().is_terminal())
+                    .with_filter(ToggleFilter(Arc::clone(&handle.enabled))),
+            )
+            .with(LogBufferLayer(log_buffer))
+            .init();
+    } else {
+        if debug {
+            handle
+                .enable()
+                .map_err(|e| color_eyre::eyre::eyre!("failed to open log file: {e}"))?;
+        }
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(handle.clone())
+                    .with_ansi(false)
+                    .with_filter(ToggleFilter(Arc::clone(&handle.enabled))),
+            )
+            .with(LogBufferLayer(log_buffer))
+            .init();
     }
-
-    let filter = ToggleFilter(Arc::clone(&handle.enabled));
-
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(handle.clone())
-                .with_ansi(false)
-                .with_filter(filter),
-        )
-        .with(LogBufferLayer(log_buffer))
-        .init();
 
     Ok(handle)
 }

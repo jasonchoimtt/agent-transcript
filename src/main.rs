@@ -197,14 +197,15 @@ async fn run_app() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     let debug = std::env::args().any(|a| a == "--debug");
+    let is_parse = std::env::args().nth(1).as_deref() == Some("parse");
     let log_buffer = LogBuffer::new(2000);
-    let debug_handle = logging::init_tracing(debug, log_buffer.clone())?;
+    let debug_handle = logging::init_tracing(debug, log_buffer.clone(), is_parse)?;
     if debug {
         tracing::info!("debug logging enabled");
     }
 
     // Dispatch 'parse' before start_mode parsing (which would reject it as an unknown provider).
-    if std::env::args().nth(1).as_deref() == Some("parse") {
+    if is_parse {
         let parse_args: Vec<String> = std::env::args().skip(2).collect();
         let waterfall = parse_args.iter().any(|a| a == "--waterfall");
         let session_arg = parse_args

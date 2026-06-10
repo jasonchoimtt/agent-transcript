@@ -1,8 +1,3 @@
-use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Seek;
-use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,7 +6,8 @@ use notify::Watcher as _;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::message::{ParseState, parse_entry, parse_entry_cb};
+use super::jsonl::JsonlReader;
+use super::message::{ParseState, parse_entry_cb};
 use crate::providers::TranscriptReader;
 use crate::providers::claude::path::{ForwardPathResult, MessageNode, MessagePath};
 use crate::providers::claude::subagent::ClaudeSubagentManager;
@@ -36,15 +32,16 @@ impl TranscriptReader for ClaudeTranscriptReader {
 
 struct ClaudeReader {
     jsonl_path: PathBuf,
+    /// Stateful reader for the main JSONL; tracks byte offset and buffers
+    /// out-of-order entries so parents are always emitted before children.
+    jsonl_reader: JsonlReader,
+
     /// Parse state for the main JSONL. This is reset when we re-parse all entries during rewind
     /// handling.
     state: ParseState,
 
     /// Message path state; used for rewind detection and path tracking.
     message_path: MessagePath,
-
-    /// How many bytes of the main JSONL have been processed.
-    byte_offset: usize,
 
     subagent_manager: ClaudeSubagentManager,
 
@@ -178,9 +175,9 @@ impl ClaudeReader {
         // Create ClaudeReader and perform initial read
         let mut reader = Self {
             jsonl_path: jsonl_path.clone(),
+            jsonl_reader: JsonlReader::new(&jsonl_path)?,
             state: ParseState::default(),
             message_path: MessagePath::new(),
-            byte_offset: 0,
             subagent_manager: ClaudeSubagentManager::new(session_dir),
             watcher_rx,
             _watcher: watcher,
@@ -195,7 +192,7 @@ impl ClaudeReader {
         let initial_ops = reader.do_initial_read()?;
         info!(
             ops = initial_ops.len(),
-            bytes = reader.byte_offset,
+            bytes = reader.jsonl_reader.byte_offset,
             "initial read complete"
         );
 
@@ -204,61 +201,35 @@ impl ClaudeReader {
         Ok(reader)
     }
 
-    /// Read the JSONL file, parse entries, and build the message path and initial operations.
-    /// Respects `self.waterfall_message_limit`: only the first N UUID-bearing entries are
-    /// processed; `self.byte_offset` is set to the byte position after the N-th entry so that
-    /// `handle_main_event` naturally picks up from there.
-    /// Updates self.state, self.message_path, and self.byte_offset directly.
+    /// Read the JSONL file via `self.jsonl_reader` and build the message path and initial
+    /// operations. `self.jsonl_reader` must be positioned at byte 0 on entry (callers are
+    /// responsible for resetting it before rewind re-reads). Respects
+    /// `self.waterfall_message_limit`: only the first N UUID-bearing entries are processed;
+    /// `self.jsonl_reader` retains its position so `handle_main_event` naturally picks up from
+    /// there. Updates `self.state`, `self.message_path` directly.
     fn do_initial_read(&mut self) -> color_eyre::Result<Vec<TreeOperation>> {
-        let file = File::open(&self.jsonl_path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-
-        // Collect UUID-bearing entries with the byte offset after each entry's newline.
-        // Lines without a trailing '\n' are incomplete and are discarded, consistent with
-        // handle_main_event which also stops at the final incomplete line.
-        // Stop early as soon as waterfall_message_limit entries have been collected.
-        let mut entries: Vec<(String, usize, serde_json::Value)> = Vec::new();
-        let limit_cap = self.waterfall_message_limit; // usize::MAX means no cap
-        // `bytes_consumed` tracks the byte position after the last '\n' seen so far.
-        // When the limit is hit we break mid-loop, leaving bytes_consumed pointing
-        // past the last processed entry's newline — exactly where handle_main_event
-        // should resume.  When the loop exhausts normally, bytes_consumed sits after
-        // the last complete line (any trailing incomplete line is excluded).
-        let mut bytes_consumed = 0usize;
+        // Collect UUID-bearing entries up to the waterfall limit.
+        let mut entries: Vec<(usize, serde_json::Value)> = Vec::new();
+        let limit_cap = self.waterfall_message_limit;
         loop {
-            line.clear();
-            let line_byte_len = reader.read_line(&mut line)?;
-
-            if !(line.ends_with('\r') || line.ends_with('\n')) {
-                break;
-            }
-
-            let byte_offset = bytes_consumed;
-            bytes_consumed += line_byte_len;
-
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                continue;
-            };
-            let Some(uuid) = obj["uuid"].as_str() else {
-                continue;
-            };
-            entries.push((uuid.to_string(), byte_offset, obj));
-            if entries.len() >= limit_cap {
-                break; // reached the limit; remaining entries are future steps
+            match self.jsonl_reader.try_recv()? {
+                None => break,
+                Some((offset, value)) => {
+                    if value["uuid"].as_str().is_some() {
+                        entries.push((offset, value));
+                        if entries.len() >= limit_cap {
+                            break;
+                        }
+                    }
+                }
             }
         }
-        // Any bytes after the last '\n' are an incomplete line — discarded.
 
         // Build MessagePath through backward then forward pass.
         let mut message_path = MessagePath::new();
 
         // Backward pass: process entries in reverse order to establish the active tail and path.
-        for (_, byte_offset, obj) in entries.iter().rev() {
+        for (byte_offset, obj) in entries.iter().rev() {
             let Some(node) = value_to_message_node(obj, *byte_offset) else {
                 continue;
             };
@@ -267,14 +238,14 @@ impl ClaudeReader {
 
         // Forward pass: process entries in document order.
         let mut ops = Vec::new();
-        for (_, byte_offset, obj) in entries.iter() {
+        for (byte_offset, obj) in entries.iter() {
             let Some(node) = value_to_message_node(obj, *byte_offset) else {
                 continue;
             };
             match message_path.forward(&node) {
                 ForwardPathResult::Ingest => {
                     ops.extend(parse_entry_cb(
-                        &serde_json::to_string(&obj).unwrap_or_default(),
+                        &serde_json::to_string(obj).unwrap_or_default(),
                         &mut self.state,
                         |tu_id, value, is_result| {
                             if is_result {
@@ -296,94 +267,73 @@ impl ClaudeReader {
         }
 
         self.message_path = message_path;
-        self.byte_offset = bytes_consumed;
 
         ops.extend(self.subagent_manager.on_init()?);
 
         Ok(ops)
     }
 
-    /// Read new bytes from the main JSONL, parse them, and handle rewinding.
-    /// In waterfall mode, processes exactly one UUID-bearing entry per call.
+    /// Drain new entries from `self.jsonl_reader`, parse them, and handle rewinding.
+    /// In waterfall mode, processes exactly one entry per call.
     /// Returns ops to emit; an empty vec means nothing new or a recoverable error.
     fn handle_main_event(&mut self) -> color_eyre::Result<Vec<ReaderOp>> {
-        let file = File::open(&self.jsonl_path)?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-
-        reader.seek(SeekFrom::Start(self.byte_offset as u64))?;
-
         let mut new_ops: Vec<ReaderOp> = Vec::new();
-        let mut cur_offset = self.byte_offset;
         let mut rewind_detected = false;
         let mut rewind_id: Option<String> = None;
+        let mut processed_any = false;
 
         loop {
-            line.clear();
-            let line_byte_len = reader.read_line(&mut line)?;
-
-            if !(line.ends_with('\r') || line.ends_with('\n')) {
-                debug!("incomplete last line, stopping here");
-                break;
-            }
-
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                cur_offset += line_byte_len;
-                continue;
-            }
-
-            let obj: serde_json::Value = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(_) => {
-                    debug!("json parse error on new line, stopping");
+            match self.jsonl_reader.try_recv()? {
+                None => {
+                    debug!("no more complete lines");
                     break;
                 }
-            };
+                Some((offset, value)) => {
+                    let json_str = serde_json::to_string(&value).unwrap_or_default();
 
-            if let Some(node) = value_to_message_node(&obj, cur_offset) {
-                let should_ingest = match self.message_path.forward(&node) {
-                    ForwardPathResult::Ingest => true,
-                    ForwardPathResult::Rewind => {
-                        info!(
-                            uuid = node.uuid,
-                            parent_uuid = node.parent_uuid.unwrap_or(""),
-                            "rewind detected"
+                    let mut should_ingest = true;
+                    if let Some(node) = value_to_message_node(&value, offset) {
+                        should_ingest = match self.message_path.forward(&node) {
+                            ForwardPathResult::Ingest => true,
+                            ForwardPathResult::Rewind => {
+                                info!(
+                                    uuid = node.uuid,
+                                    parent_uuid = node.parent_uuid.unwrap_or(""),
+                                    "rewind detected"
+                                );
+                                rewind_id = Some(node.uuid.to_string());
+                                rewind_detected = true;
+                                break;
+                            }
+                            ForwardPathResult::Drop => false,
+                        };
+                    }
+
+                    if should_ingest {
+                        new_ops.extend(
+                            parse_entry_cb(
+                                &json_str,
+                                &mut self.state,
+                                |tu_id, value, is_result| {
+                                    if is_result {
+                                        self.subagent_manager.on_subagent_tool_result(tu_id, value)
+                                    } else {
+                                        self.subagent_manager.on_subagent_tool_use(tu_id, value)
+                                    }
+                                },
+                            )?
+                            .into_iter()
+                            .map(ReaderOp::Tree),
                         );
-                        rewind_id = Some(node.uuid.to_string());
-                        rewind_detected = true;
-                        cur_offset += line_byte_len;
+                    }
+
+                    processed_any = true;
+
+                    // In waterfall mode, process exactly one entry per call.
+                    if self.waterfall {
                         break;
                     }
-                    ForwardPathResult::Drop => false,
-                };
-
-                if should_ingest {
-                    new_ops.extend(
-                        parse_entry_cb(line.trim(), &mut self.state, |tu_id, value, is_result| {
-                            if is_result {
-                                self.subagent_manager.on_subagent_tool_result(tu_id, value)
-                            } else {
-                                self.subagent_manager.on_subagent_tool_use(tu_id, value)
-                            }
-                        })?
-                        .into_iter()
-                        .map(ReaderOp::Tree),
-                    );
                 }
-            } else {
-                new_ops.extend(
-                    parse_entry(line.trim(), &mut self.state)?
-                        .into_iter()
-                        .map(ReaderOp::Tree),
-                );
-            }
-
-            cur_offset += line_byte_len;
-
-            // In waterfall mode, process exactly one entry per call.
-            if self.waterfall {
-                break;
             }
         }
 
@@ -397,6 +347,7 @@ impl ClaudeReader {
             self.message_path.reset();
             // Reset sub-agent tracking too — the rewind may change which tool_uses exist.
             self.subagent_manager.clear();
+            self.jsonl_reader = JsonlReader::new(&self.jsonl_path)?;
             let result = self.do_initial_read();
             match result {
                 Ok(ops) => {
@@ -407,11 +358,8 @@ impl ClaudeReader {
                 }
                 Err(e) => warn!("re-read after rewind error: {}", e),
             }
-        } else {
-            if self.waterfall && cur_offset > self.byte_offset {
-                self.waterfall_message_limit = self.waterfall_message_limit.saturating_add(1);
-            }
-            self.byte_offset = cur_offset;
+        } else if self.waterfall && processed_any {
+            self.waterfall_message_limit = self.waterfall_message_limit.saturating_add(1);
         }
 
         Ok(new_ops)
@@ -439,17 +387,20 @@ impl ClaudeReader {
 
         if snapshot && self.waterfall {
             // Waterfall + snapshot: drive handle_main_event until all entries are exhausted.
-            // Break when byte_offset stops advancing (no new bytes or unrecoverable parse error),
-            // not when ops is empty — some entries (e.g. system/local_command) produce no ops.
+            // Break when byte_offset stops advancing AND the queued buffer is empty (no new bytes
+            // or unrecoverable parse error), not when ops is empty — some entries (e.g.
+            // system/local_command) produce no ops.
             loop {
-                let prev_offset = self.byte_offset;
+                let prev_offset = self.jsonl_reader.byte_offset;
                 let ops = self.handle_main_event()?;
                 for op in ops {
                     if tx.send(Ok(op)).await.is_err() {
                         return Ok(());
                     }
                 }
-                if self.byte_offset == prev_offset {
+                if self.jsonl_reader.byte_offset == prev_offset
+                    && self.jsonl_reader.queued.is_empty()
+                {
                     break;
                 }
             }
@@ -971,9 +922,9 @@ mod tests {
 
         let mut reader = ClaudeReader {
             jsonl_path: jsonl_path.clone(),
+            jsonl_reader: JsonlReader::new(&jsonl_path).unwrap(),
             state: ParseState::default(),
             message_path: MessagePath::new(),
-            byte_offset: 0,
             subagent_manager: ClaudeSubagentManager::new(session_dir.clone()),
             watcher_rx,
             _watcher: watcher,
@@ -1010,6 +961,126 @@ mod tests {
         assert!(
             ops.iter().any(|op| matches!(op, TreeOperation::Append { message, .. } if message.id.contains("msg_asst_final"))),
             "final assistant node must be emitted; ops: {op_ids:?}"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Out-of-order entries: a child appears in the file one line before the parent it
+    /// references.  In real Claude Code transcripts an attachment entry can be written
+    /// before the tool_result it annotates:
+    ///
+    ///   line 3: attachment  (parentUuid = "tool-result")      ← child before parent
+    ///   line 4: tool-result (parentUuid = "asst-a", tool_result) ← parent after child
+    ///
+    /// `JsonlReader` buffers the attachment until its parent has been emitted, so
+    /// `do_initial_read` sees them in parent-before-child order.  The backward pass
+    /// in `MessagePath` (which gets the already-reordered sequence) must therefore
+    /// treat them identically to in-order entries.
+    ///
+    /// The test verifies two things end-to-end:
+    ///  1. `tool_result:tu-1` is emitted — the out-of-order tool_result entry is ingested.
+    ///  2. A continuation message that chains off the attachment is also emitted.
+    #[test]
+    fn test_initial_read_out_of_order_child_before_parent() {
+        use std::io::Write as _;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agt_test_ooo_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let jsonl_path = temp_dir.join("session.jsonl");
+
+        // Write the transcript with out-of-order entries.
+        // Document order:
+        //   root → asst-a (tool_use tu-1) → attachment (parentUuid=tool-result) [OOO]
+        //       → tool-result (parentUuid=asst-a, tool_result) → continuation (parentUuid=attachment)
+        {
+            let mut f = std::fs::File::create(&jsonl_path).unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "type": "user", "uuid": "root", "parentUuid": null,
+                    "message": {"role": "user", "content": "hello"}
+                })
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "type": "assistant", "uuid": "asst-a", "parentUuid": "root",
+                    "message": {"id": "msg-a", "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "tu-1", "name": "Read", "input": {}}]}
+                })
+            )
+            .unwrap();
+            // attachment: child written BEFORE its parent tool-result
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "type": "attachment", "uuid": "attachment", "parentUuid": "tool-result"
+                })
+            )
+            .unwrap();
+            // tool-result: parent written AFTER the child attachment
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "type": "user", "uuid": "tool-result", "parentUuid": "asst-a",
+                    "message": {"role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "tu-1", "content": "ok"}]}
+                })
+            )
+            .unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "type": "assistant", "uuid": "continuation", "parentUuid": "attachment",
+                    "message": {"id": "msg-cont", "role": "assistant",
+                        "content": [{"type": "text", "text": "done"}]}
+                })
+            )
+            .unwrap();
+        }
+
+        let mut reader = make_reader(&jsonl_path);
+        let ops = reader.do_initial_read().unwrap();
+
+        let op_ids: Vec<String> = ops
+            .iter()
+            .map(|op| match op {
+                TreeOperation::Append { message, .. } => format!("Append({})", message.id),
+                TreeOperation::Replace { id, .. } => format!("Replace({})", id),
+                TreeOperation::Remove { id } => format!("Remove({})", id),
+                TreeOperation::Update { id, .. } => format!("Update({})", id),
+            })
+            .collect();
+
+        // The out-of-order tool_result must be emitted so tu-1 resolves.
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                TreeOperation::Append { message, .. } if message.id == "tool_result:tu-1"
+            )),
+            "tool_result:tu-1 must be emitted despite out-of-order attachment; ops: {op_ids:?}"
+        );
+
+        // The continuation chaining off the attachment must also be emitted.
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                TreeOperation::Append { message, .. } if message.id.contains("msg-cont")
+            )),
+            "continuation (msg-cont) must be emitted; ops: {op_ids:?}"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -1089,9 +1160,9 @@ mod tests {
 
         let mut reader = ClaudeReader {
             jsonl_path: jsonl_path.clone(),
+            jsonl_reader: JsonlReader::new(&jsonl_path).unwrap(),
             state: ParseState::default(),
             message_path: MessagePath::new(),
-            byte_offset: 0,
             subagent_manager: ClaudeSubagentManager::new(session_dir.clone()),
             watcher_rx,
             _watcher: watcher,
@@ -1369,9 +1440,9 @@ mod tests {
         drop(sa_tx);
         ClaudeReader {
             jsonl_path: jsonl.to_owned(),
+            jsonl_reader: JsonlReader::new(jsonl).unwrap(),
             state: ParseState::default(),
             message_path: MessagePath::new(),
-            byte_offset: 0,
             subagent_manager: ClaudeSubagentManager::new(session_dir.clone()),
             watcher_rx,
             _watcher: watcher,

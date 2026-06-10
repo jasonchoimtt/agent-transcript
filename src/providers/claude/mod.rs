@@ -1,3 +1,4 @@
+pub mod jsonl;
 pub mod message;
 mod path;
 mod reader;
