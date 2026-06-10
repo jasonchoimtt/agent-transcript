@@ -39,6 +39,10 @@ impl LuaTransform {
 }
 
 impl Transform for LuaTransform {
+    fn name(&self) -> &str {
+        "lua_transform"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         let original = ops.clone();
         match self.try_process(ops) {

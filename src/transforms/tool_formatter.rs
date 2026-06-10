@@ -120,6 +120,10 @@ fn rule_matches_provider(rule: &ToolFormatterRule, provider: &str) -> bool {
 }
 
 impl Transform for ToolFormatter {
+    fn name(&self) -> &str {
+        "tool_formatter"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         ops.into_iter()
             .map(|op| match op {

@@ -59,6 +59,10 @@ impl UiInitializer {
 }
 
 impl Transform for UiInitializer {
+    fn name(&self) -> &str {
+        "ui_initializer"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         ops.into_iter()
             .map(|op| match op {

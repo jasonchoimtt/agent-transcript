@@ -562,6 +562,10 @@ impl ToolGrouper {
 }
 
 impl Transform for ToolGrouper {
+    fn name(&self) -> &str {
+        "tool_grouper"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         let mut output = Vec::new();
         for op in ops {

@@ -30,7 +30,7 @@ pub mod tree_scroll_view;
 
 const USAGE: &str = "\
 Usage: agt [--resume] [--debug] [<provider>[:<session-id>]]
-       agt parse [--waterfall] [--debug] <provider>:<session-id>
+       agt parse [--waterfall] [--debug] [--debug-transform <name>] <provider>:<session-id>
        agt install-hooks <provider>
        agt -h | --help
 
@@ -46,21 +46,25 @@ Options:
   -h, --help                   Show this message
 
 Subcommands:
-  parse [--waterfall] [--debug] <provider>:<session-id>
+  parse [--waterfall] [--debug] [--debug-transform <name>] <provider>:<session-id>
                                Parse transcript, apply transforms, pretty-print tree and exit.
                                --waterfall simulates live streaming one entry at a time,
                                printing RESET ids when the reader rewinds.
+                               --debug-transform <name> logs every input and output op for the
+                               named transform stage (e.g. tool_grouper, tool_formatter).
   install-hooks [--force] <provider>
                                Install session hooks for the given provider.
 
 Examples:
-  agt                                  Open the session picker
-  agt claude                           Start a new Claude Code session
-  agt claude:abc123                    View session abc123
-  agt --resume claude:abc123           Resume Claude Code in session abc123
-  agt parse cursor:abc123              Dump parsed+transformed tree for a Cursor session
-  agt parse claude:abc123              Dump parsed+transformed tree for a Claude session
-  agt parse --waterfall claude:abc123  Simulate live streaming and show rewind events
+  agt                                              Open the session picker
+  agt claude                                       Start a new Claude Code session
+  agt claude:abc123                                View session abc123
+  agt --resume claude:abc123                       Resume Claude Code in session abc123
+  agt parse cursor:abc123                          Dump parsed+transformed tree for a Cursor session
+  agt parse claude:abc123                          Dump parsed+transformed tree for a Claude session
+  agt parse --waterfall claude:abc123              Simulate live streaming and show rewind events
+  agt parse --debug-transform tool_grouper claude:abc123
+                                                   Log tool_grouper I/O ops while parsing
 ";
 
 /// Parse a pre-extracted (`resume` flag, optional free argument) into a `StartMode`.
@@ -208,13 +212,26 @@ async fn run_app() -> color_eyre::Result<()> {
     if is_parse {
         let parse_args: Vec<String> = std::env::args().skip(2).collect();
         let waterfall = parse_args.iter().any(|a| a == "--waterfall");
+        // --debug-transform <name>: the value is the next arg after the flag.
+        let debug_transform: Option<String> = parse_args
+            .iter()
+            .position(|a| a == "--debug-transform")
+            .and_then(|i| parse_args.get(i + 1))
+            .cloned();
         let session_arg = parse_args
             .iter()
-            .find(|a| !a.starts_with('-'))
-            .cloned()
+            .enumerate()
+            .find(|(i, a)| {
+                !a.starts_with('-')
+                    // skip the value that belongs to --debug-transform
+                    && parse_args
+                        .get(i.wrapping_sub(1))
+                        .is_none_or(|prev| prev != "--debug-transform")
+            })
+            .map(|(_, a)| a.clone())
             .unwrap_or_default();
         let config = Config::load();
-        return cmd_parse::run(&session_arg, &config, waterfall).await;
+        return cmd_parse::run(&session_arg, &config, waterfall, debug_transform.as_deref()).await;
     }
 
     let start_mode = parse_args().unwrap_or_else(|e| {

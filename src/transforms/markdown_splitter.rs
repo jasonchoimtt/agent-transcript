@@ -197,6 +197,10 @@ impl MarkdownSplitter {
 }
 
 impl Transform for MarkdownSplitter {
+    fn name(&self) -> &str {
+        "markdown_splitter"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         let mut output = Vec::new();
         for op in ops {

@@ -288,6 +288,10 @@ fn parse_range(s: &str) -> Option<(u32, u32)> {
 }
 
 impl Transform for ToolResultEnricher {
+    fn name(&self) -> &str {
+        "tool_result_enricher"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         let mut output = Vec::with_capacity(ops.len());
         for op in ops {

@@ -74,6 +74,10 @@ pub trait Transform: Send + 'static {
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation>;
     /// Clear all internal state. Called by the pipeline when a Reset op is received.
     fn reset(&mut self) {}
+    /// Short identifier used for `--debug-transform` matching. Empty string means unnamed.
+    fn name(&self) -> &str {
+        ""
+    }
 }
 
 /// Spawn the pipeline task. Drains batches from `input`, folds each through `transforms`

@@ -88,6 +88,10 @@ impl TableConverter {
 }
 
 impl Transform for TableConverter {
+    fn name(&self) -> &str {
+        "table_converter"
+    }
+
     fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
         let mut output = Vec::with_capacity(ops.len());
         for op in ops {

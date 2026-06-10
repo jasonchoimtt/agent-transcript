@@ -5,13 +5,20 @@ use crossterm::style::{Color, Stylize as _};
 use crate::config::Config;
 use crate::providers::{LoadConfig, ProviderKind, TranscriptReader};
 use crate::reader_op::ReaderOp;
-use crate::transforms::{apply_batch, build_transforms};
+use crate::transforms::{Transform, apply_batch, build_transforms};
+use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::TreeScrollViewState;
 use crate::tree_scroll_view::state::{MessageState, MessageType};
 
-/// `agt parse [--waterfall] [--debug] <provider>:<session-id>` — load a transcript, apply the
-/// transform pipeline, and pretty-print the resulting tree to stdout, then exit.
-pub async fn run(session_arg: &str, config: &Config, waterfall: bool) -> color_eyre::Result<()> {
+/// `agt parse [--waterfall] [--debug] [--debug-transform <name>] <provider>:<session-id>` —
+/// load a transcript, apply the transform pipeline, and pretty-print the resulting tree to
+/// stdout, then exit.
+pub async fn run(
+    session_arg: &str,
+    config: &Config,
+    waterfall: bool,
+    debug_transform: Option<&str>,
+) -> color_eyre::Result<()> {
     let colon_pos = session_arg
         .find(':')
         .ok_or_else(|| color_eyre::eyre::eyre!("usage: agt parse <provider>:<session-id>"))?;
@@ -38,7 +45,7 @@ pub async fn run(session_arg: &str, config: &Config, waterfall: bool) -> color_e
             },
         )
         .await?;
-    drain_transform_print(&mut reader, config, &provider, use_color).await;
+    drain_transform_print(&mut reader, config, &provider, use_color, debug_transform).await;
 
     Ok(())
 }
@@ -48,6 +55,7 @@ async fn drain_transform_print(
     config: &Config,
     provider: &ProviderKind,
     use_color: bool,
+    debug_transform: Option<&str>,
 ) {
     let mut raw_ops = Vec::new();
     while let Some(item) = reader.updates().recv().await {
@@ -67,6 +75,30 @@ async fn drain_transform_print(
         None,
         &config.widgets.tool_result.file_delta,
     );
+
+    // Wrap the requested transform in a debug logger.
+    if let Some(name) = debug_transform {
+        let pos = transforms.iter().position(|t| t.name() == name);
+        match pos {
+            Some(i) => {
+                let inner = transforms.remove(i);
+                transforms.insert(i, Box::new(DebugTransform::new(inner)));
+                eprintln!("debug-transform: wrapping '{name}' at pipeline position {i}");
+            }
+            None => {
+                let known: Vec<&str> = transforms
+                    .iter()
+                    .map(|t| t.name())
+                    .filter(|n| !n.is_empty())
+                    .collect();
+                eprintln!(
+                    "warning: transform '{name}' not found. Known transforms: {}",
+                    known.join(", ")
+                );
+            }
+        }
+    }
+
     let ops = apply_batch(raw_ops, &mut transforms);
     eprintln!("{} ops after transforms", ops.len());
 
@@ -86,6 +118,80 @@ async fn drain_transform_print(
         println!();
     }
 }
+
+// ── Debug transform wrapper ───────────────────────────────────────────────────
+
+struct DebugTransform {
+    inner: Box<dyn Transform>,
+    call_n: usize,
+}
+
+impl DebugTransform {
+    fn new(inner: Box<dyn Transform>) -> Self {
+        Self { inner, call_n: 0 }
+    }
+}
+
+impl Transform for DebugTransform {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn process(&mut self, ops: Vec<TreeOperation>) -> Vec<TreeOperation> {
+        let n = self.call_n;
+        self.call_n += 1;
+        eprintln!(
+            "\n[debug-transform:{}] call {} — INPUT {} ops:",
+            self.inner.name(),
+            n,
+            ops.len()
+        );
+        for op in &ops {
+            eprintln!("  {}", fmt_op(op));
+        }
+        let out = self.inner.process(ops);
+        eprintln!(
+            "[debug-transform:{}] call {} — OUTPUT {} ops:",
+            self.inner.name(),
+            n,
+            out.len()
+        );
+        for op in &out {
+            eprintln!("  {}", fmt_op(op));
+        }
+        out
+    }
+
+    fn reset(&mut self) {
+        eprintln!("\n[debug-transform:{}] RESET", self.inner.name());
+        self.inner.reset();
+    }
+}
+
+fn fmt_op(op: &TreeOperation) -> String {
+    match op {
+        TreeOperation::Append { parent_id, message } => format!(
+            "Append  id={:50} type={:20} parent={:?}",
+            message.id,
+            message.message_type.variant_name(),
+            parent_id.as_deref().unwrap_or("<root>"),
+        ),
+        TreeOperation::Replace { id, message } => format!(
+            "Replace id={:50} type={:20} new_id={}",
+            id,
+            message.message_type.variant_name(),
+            message.id,
+        ),
+        TreeOperation::Remove { id } => format!("Remove  id={}", id,),
+        TreeOperation::Update { id, message } => format!(
+            "Update  id={:50} type={}",
+            id,
+            message.message_type.variant_name(),
+        ),
+    }
+}
+
+// ── rendering ─────────────────────────────────────────────────────────────────
 
 fn type_color(mt: &MessageType) -> Color {
     match mt {
