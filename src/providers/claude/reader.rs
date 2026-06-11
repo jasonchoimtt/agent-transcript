@@ -1499,7 +1499,7 @@ mod tests {
         assert!(
             ops.iter().any(|op| {
                 if let ReaderOp::Tree(TreeOperation::Append { message, parent_id }) = op {
-                    message.id == "task_summary:tu-1"
+                    message.id == "agent_id:tu-1"
                         && parent_id.as_deref() == Some("tool_call:tu-1")
                         && message
                             .text
@@ -1604,7 +1604,7 @@ mod tests {
         assert!(
             !ops.iter().any(|op| {
                 matches!(op, ReaderOp::Tree(TreeOperation::Append { message, .. })
-                    if message.id == "task_summary:tu-1")
+                    if message.id == "agent_id:tu-1")
             }),
             "no task_summary should appear before the tool_use is processed; ops: {:?}",
             op_summary(&ops)
@@ -1626,13 +1626,12 @@ mod tests {
         assert!(
             ops.iter().any(|op| {
                 if let ReaderOp::Tree(TreeOperation::Append { message, parent_id }) = op {
-                    message.id == "task_summary:tu-1"
-                        && parent_id.as_deref() == Some("tool_call:tu-1")
+                    message.id == "agent_id:tu-1" && parent_id.as_deref() == Some("tool_call:tu-1")
                 } else {
                     false
                 }
             }),
-            "tool_use processing should emit task_summary:tu-1 placeholder by matching waiting watcher; ops: {:?}",
+            "tool_use processing should emit agent_id:tu-1 placeholder by matching waiting watcher; ops: {:?}",
             op_summary(&ops)
         );
 
@@ -1725,13 +1724,12 @@ mod tests {
         assert!(
             ops.iter().any(|op| {
                 if let ReaderOp::Tree(TreeOperation::Append { message, parent_id }) = op {
-                    message.id == "task_summary:tu-1"
-                        && parent_id.as_deref() == Some("tool_call:tu-1")
+                    message.id == "agent_id:tu-1" && parent_id.as_deref() == Some("tool_call:tu-1")
                 } else {
                     false
                 }
             }),
-            "meta.json should emit task_summary:tu-1 placeholder; ops: {:?}",
+            "meta.json should emit agent_id:tu-1 placeholder; ops: {:?}",
             op_summary(&ops)
         );
         assert!(
@@ -1802,13 +1800,12 @@ mod tests {
         assert!(
             ops.iter().any(|op| {
                 if let ReaderOp::Tree(TreeOperation::Append { message, parent_id }) = op {
-                    message.id == "task_summary:tu-1"
-                        && parent_id.as_deref() == Some("tool_call:tu-1")
+                    message.id == "agent_id:tu-1" && parent_id.as_deref() == Some("tool_call:tu-1")
                 } else {
                     false
                 }
             }),
-            "async meta.json should emit task_summary:tu-1 placeholder; ops: {:?}",
+            "async meta.json should emit agent_id:tu-1 placeholder; ops: {:?}",
             op_summary(&ops)
         );
 
@@ -2253,7 +2250,7 @@ mod tests {
     // ── 9. Duplicate meta.json events are idempotent ──────────────────────────
 
     /// The filesystem fires multiple events for the same meta.json.
-    /// task_summary:tu-1 must appear exactly once.
+    /// agent_id:tu-1 must appear exactly once.
     #[tokio::test]
     async fn test_sa_duplicate_meta_events_idempotent() {
         let td = sa_temp_dir("dup_meta");
@@ -2297,13 +2294,13 @@ mod tests {
             .iter()
             .filter(|op| {
                 matches!(op, ReaderOp::Tree(TreeOperation::Append { message, .. })
-                    if message.id == "task_summary:tu-1")
+                    if message.id == "agent_id:tu-1")
             })
             .count();
         assert_eq!(
             task_summary_appends,
             1,
-            "task_summary:tu-1 must appear exactly once despite duplicate meta.json events; ops: {:?}",
+            "agent_id:tu-1 must appear exactly once despite duplicate meta.json events; ops: {:?}",
             op_summary(&ops)
         );
 

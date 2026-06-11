@@ -219,7 +219,7 @@ impl ClaudeSubagentManager {
             subagent.placeholder_emitted = true;
             ops.push(TreeOperation::Append {
                 parent_id: Some(format!("tool_call:{}", tool_use_id)),
-                message: MessageState::new(format!("task_summary:{}", tool_use_id))
+                message: MessageState::new(format!("agent_id:{}", tool_use_id))
                     .text(format!("Agent ID: {agent_id}"))
                     .message_type(MessageType::TaskSummary),
             });
