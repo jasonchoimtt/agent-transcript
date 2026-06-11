@@ -30,7 +30,7 @@ pub mod tree_scroll_view;
 
 const USAGE: &str = "\
 Usage: agt [--resume] [--debug] [<provider>[:<session-id>]]
-       agt parse [--waterfall] [--debug] [--debug-transform <name>] <provider>:<session-id>
+       agt parse [--waterfall] [--debug] [--trace] [--debug-transform <name>] <provider>:<session-id>
        agt install-hooks <provider>
        agt -h | --help
 
@@ -46,10 +46,12 @@ Options:
   -h, --help                   Show this message
 
 Subcommands:
-  parse [--waterfall] [--debug] [--debug-transform <name>] <provider>:<session-id>
+  parse [--waterfall] [--debug] [--trace] [--debug-transform <name>] <provider>:<session-id>
                                Parse transcript, apply transforms, pretty-print tree and exit.
                                --waterfall simulates live streaming one entry at a time,
                                printing RESET ids when the reader rewinds.
+                               --debug logs debug-level output to stderr.
+                               --trace logs trace-level output to stderr (more verbose than --debug).
                                --debug-transform <name> logs every input and output op for the
                                named transform stage (e.g. tool_grouper, tool_formatter).
   install-hooks [--force] <provider>
@@ -63,6 +65,7 @@ Examples:
   agt parse cursor:abc123                          Dump parsed+transformed tree for a Cursor session
   agt parse claude:abc123                          Dump parsed+transformed tree for a Claude session
   agt parse --waterfall claude:abc123              Simulate live streaming and show rewind events
+  agt parse --trace claude:abc123                  Same, with trace-level logging to stderr
   agt parse --debug-transform tool_grouper claude:abc123
                                                    Log tool_grouper I/O ops while parsing
 ";
@@ -202,9 +205,12 @@ async fn run_app() -> color_eyre::Result<()> {
 
     let debug = std::env::args().any(|a| a == "--debug");
     let is_parse = std::env::args().nth(1).as_deref() == Some("parse");
+    let trace = is_parse && std::env::args().any(|a| a == "--trace");
     let log_buffer = LogBuffer::new(2000);
-    let debug_handle = logging::init_tracing(debug, log_buffer.clone(), is_parse)?;
-    if debug {
+    let debug_handle = logging::init_tracing(debug, trace, log_buffer.clone(), is_parse)?;
+    if trace {
+        tracing::info!("trace logging enabled");
+    } else if debug {
         tracing::info!("debug logging enabled");
     }
 

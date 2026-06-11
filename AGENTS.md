@@ -129,6 +129,22 @@ Raw transcript data flows through these stages:
 - Read events from the `mpsc::UnboundedReceiver<Event>` passed to `new_with_cmd` — no mock needed.
 - Allow 100 ms of startup time before draining initial output; allow 100 ms after a signal before asserting.
 
+## Debugging transforms
+
+- Add `tracing::debug!` / `tracing::trace!` calls to transform code; the subscriber is already wired up.
+- Find a session ID that reproduces the bug via the picker or `~/.claude/projects/` / Cursor DB.
+- Run the parse subcommand against it:
+  ```bash
+  cargo run -- parse --trace --debug-transform tool_grouper claude:<session-id>
+  ```
+  - `--trace` — enables trace-level logging to stderr (superset of `--debug`)
+  - `--debug` — enables debug-level logging to stderr
+  - `--debug-transform <name>` — logs every input and output `TreeOperation` for that transform stage
+- Use `--waterfall` to replay ops one transcript entry at a time, which reveals ordering / streaming bugs:
+  ```bash
+  cargo run -- parse --waterfall --trace claude:<session-id>
+  ```
+
 ## Architecture
 
 Global state lives in `App` (`src/app.rs`), which owns the event loop and renders the full layout. UI is split into modules (e.g. `tree_scroll_view/`, `terminal/`), each providing:

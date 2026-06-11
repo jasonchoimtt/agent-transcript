@@ -65,7 +65,10 @@ impl<'a> MakeWriter<'a> for DebugHandle {
 
 /// Per-event filter backed by an `AtomicBool`. Returns `Interest::sometimes()` so
 /// the flag change takes effect without restarting the process.
-struct ToggleFilter(Arc<AtomicBool>);
+struct ToggleFilter {
+    enabled: Arc<AtomicBool>,
+    max_level: tracing::Level,
+}
 
 impl<S: tracing::Subscriber> tracing_subscriber::layer::Filter<S> for ToggleFilter {
     fn enabled(
@@ -73,8 +76,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Filter<S> for ToggleFilt
         meta: &tracing::Metadata<'_>,
         _: &tracing_subscriber::layer::Context<'_, S>,
     ) -> bool {
-        self.0.load(Ordering::Relaxed)
-            && *meta.level() <= tracing::Level::DEBUG
+        self.enabled.load(Ordering::Relaxed)
+            && *meta.level() <= self.max_level
             && !meta.target().starts_with("tui_markdown")
     }
 
@@ -89,27 +92,37 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Filter<S> for ToggleFilt
 
 pub fn init_tracing(
     debug: bool,
+    trace: bool,
     log_buffer: LogBuffer,
     log_to_stderr: bool,
 ) -> color_eyre::Result<DebugHandle> {
     let handle = DebugHandle::default();
+    let max_level = if trace {
+        tracing::Level::TRACE
+    } else {
+        tracing::Level::DEBUG
+    };
+    let active = debug || trace;
 
     if log_to_stderr {
         // Parse mode: no TUI, so stderr is available. Write directly there.
         handle
             .enabled
-            .store(debug, std::sync::atomic::Ordering::Release);
+            .store(active, std::sync::atomic::Ordering::Release);
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_writer(std::io::stderr)
                     .with_ansi(std::io::stderr().is_terminal())
-                    .with_filter(ToggleFilter(Arc::clone(&handle.enabled))),
+                    .with_filter(ToggleFilter {
+                        enabled: Arc::clone(&handle.enabled),
+                        max_level,
+                    }),
             )
             .with(LogBufferLayer(log_buffer))
             .init();
     } else {
-        if debug {
+        if active {
             handle
                 .enable()
                 .map_err(|e| color_eyre::eyre::eyre!("failed to open log file: {e}"))?;
@@ -119,7 +132,10 @@ pub fn init_tracing(
                 tracing_subscriber::fmt::layer()
                     .with_writer(handle.clone())
                     .with_ansi(false)
-                    .with_filter(ToggleFilter(Arc::clone(&handle.enabled))),
+                    .with_filter(ToggleFilter {
+                        enabled: Arc::clone(&handle.enabled),
+                        max_level,
+                    }),
             )
             .with(LogBufferLayer(log_buffer))
             .init();
