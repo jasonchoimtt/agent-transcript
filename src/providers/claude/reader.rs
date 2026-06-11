@@ -236,6 +236,10 @@ impl ClaudeReader {
             message_path.backward(&node);
         }
 
+        // Pre-populate subagent watchers so that on_subagent_tool_result can find them during
+        // the forward pass and read content inline, before message.rs appends task_summary.
+        self.subagent_manager.on_init()?;
+
         // Forward pass: process entries in document order.
         let mut ops = Vec::new();
         for (byte_offset, obj) in entries.iter() {
@@ -267,8 +271,6 @@ impl ClaudeReader {
         }
 
         self.message_path = message_path;
-
-        ops.extend(self.subagent_manager.on_init()?);
 
         Ok(ops)
     }
@@ -1936,7 +1938,21 @@ mod tests {
         );
 
         // task_summary must carry the final result (not "Agent ID:")
-        let summary_text = ops
+        let summary_text = ops.iter().find_map(|op| {
+            if let TreeOperation::Append { message, .. } = op {
+                if message.id == "task_summary:tu-1" {
+                    return message.text.as_deref();
+                }
+            }
+            None
+        });
+        assert!(
+            summary_text.as_deref().unwrap_or("").contains("Finished!"),
+            "task_summary should carry final result text, not placeholder; got: {summary_text:?}"
+        );
+
+        // task_summary must appear after subagent content (correct ordering)
+        let positions: Vec<&str> = ops
             .iter()
             .filter_map(|op| {
                 if let TreeOperation::Append {
@@ -1945,7 +1961,7 @@ mod tests {
                 } = op
                 {
                     if p == "tool_call:tu-1" {
-                        message.text.as_deref()
+                        Some(message.id.as_str())
                     } else {
                         None
                     }
@@ -1953,10 +1969,12 @@ mod tests {
                     None
                 }
             })
-            .next();
+            .collect();
+        let sa_pos = positions.iter().position(|id| id.starts_with("sa:abc:"));
+        let ts_pos = positions.iter().position(|id| *id == "task_summary:tu-1");
         assert!(
-            summary_text.as_deref().unwrap_or("").contains("Finished!"),
-            "task_summary should carry final result text, not placeholder; got: {summary_text:?}"
+            sa_pos < ts_pos,
+            "task_summary must appear after subagent content; order: {positions:?}"
         );
 
         // No Reset op

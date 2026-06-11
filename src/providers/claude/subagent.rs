@@ -49,23 +49,29 @@ impl ClaudeSubagentManager {
         }
     }
 
-    /// Called on initial read to back-fill all subagents
-    pub fn on_init(&mut self) -> color_eyre::Result<Vec<TreeOperation>> {
-        let mut ops = Vec::new();
-
+    /// Called before the initial-read forward pass to pre-populate subagent watchers.
+    /// Only creates watcher entries (via detect_subagent); does NOT read JSONL content.
+    /// Content is read later when the forward pass processes the matching tool_result entry,
+    /// ensuring subagent ops are ordered after the tool_call Append.
+    pub fn on_init(&mut self) -> color_eyre::Result<()> {
         let subagents_dir = self.session_dir.join("subagents");
         if fs::exists(&subagents_dir)? {
             for entry in fs::read_dir(&subagents_dir)? {
                 let entry = entry?;
-                if let Some(ext) = entry.path().extension()
-                    && ext == "jsonl"
-                {
-                    ops.extend(self.on_subagent_event(entry.path())?);
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "jsonl") {
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(agent_id) = parse_sa_jsonl_filename(&filename) {
+                        self.detect_subagent(&agent_id, &path);
+                    }
                 }
             }
         }
-
-        Ok(ops)
+        Ok(())
     }
 
     /// Called when an `Agent` tool_use block is first encountered in the main JSONL.
