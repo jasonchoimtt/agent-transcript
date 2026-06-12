@@ -45,9 +45,19 @@ use crate::tree_scroll_view::state::{MessageState, MessageType};
 /// - `"error"` — if any child has an error tag (used for error-indicator styling).
 /// - `"success"` — if all children have a success tag.
 /// - no tag — mixed or unknown state.
+///
+/// # Concurrent states
+///
+/// Multiple runs can be active simultaneously via a `HashMap<String, ActiveRun>` keyed
+/// by `state_id`. Normal tool calls (parent not a known tool call) share the `"default"`
+/// state. Sub-agent tool calls (parent = a known tool call ID) get their own isolated
+/// state keyed by that parent tool call ID.
 pub struct ToolGrouper {
     groups: Vec<ToolGroup>,
-    active: ActiveRun,
+    /// Active runs keyed by state_id. Absent key = idle (empty Collecting).
+    active: HashMap<String, ActiveRun>,
+    /// All tool call IDs ever emitted; used to detect sub-agent tool calls.
+    known_tool_ids: HashSet<String>,
     allow_thinking: bool,
     /// Sealed containers for Remove propagation: container_id → child_ids.
     committed_groups: HashMap<String, HashSet<String>>,
@@ -83,10 +93,8 @@ impl ToolGrouper {
         Self {
             groups: config.effective_groups(),
             allow_thinking: config.allow_thinking,
-            active: ActiveRun::Collecting {
-                parent_id: None,
-                buffer: vec![],
-            },
+            active: HashMap::new(),
+            known_tool_ids: HashSet::new(),
             committed_groups: HashMap::new(),
         }
     }
@@ -213,67 +221,160 @@ impl ToolGrouper {
         }
     }
 
-    /// Handle a Remove op against the active run state and committed groups.
+    /// Determine which state should process `op`.
+    ///
+    /// For Append:
+    ///   1. parent_id is an active state key → route there (sub-agent reply seals that state).
+    ///   2. ToolCall Append with parent_id ∈ known_tool_ids → state_id = parent_id (sub-agent run).
+    ///   3. parent_id is within any active state's buffer_ids or child_ids → route to that state.
+    ///   4. Fallback → "default".
+    ///
+    /// For Replace:
+    ///   1. id is an active state key → route there.
+    ///   3. id is within any active state's buffer_ids or child_ids → route to that state.
+    ///   4. Fallback → "default".
+    fn find_state_for_op(&self, op: &TreeOperation) -> String {
+        match op {
+            TreeOperation::Append { parent_id, message } => {
+                if let Some(pid) = parent_id {
+                    // Check 1: parent_id is an active state key.
+                    if self.active.contains_key(pid.as_str()) {
+                        return pid.clone();
+                    }
+                    // Check 2: ToolCall Append with parent_id ∈ known_tool_ids.
+                    if message.message_type == MessageType::ToolCall
+                        && self.known_tool_ids.contains(pid.as_str())
+                    {
+                        return pid.clone();
+                    }
+                    // Check 3: parent_id is within any active state's owned IDs.
+                    for (state_id, run) in &self.active {
+                        if state_owns_id(run, pid) {
+                            return state_id.clone();
+                        }
+                    }
+                }
+                "default".to_string()
+            }
+            TreeOperation::Replace { id, .. } => {
+                // Check 1: id is an active state key.
+                if self.active.contains_key(id.as_str()) {
+                    return id.clone();
+                }
+                // Check 3: id is within any active state's owned IDs.
+                for (state_id, run) in &self.active {
+                    if state_owns_id(run, id) {
+                        return state_id.clone();
+                    }
+                }
+                "default".to_string()
+            }
+            _ => "default".to_string(),
+        }
+    }
+
+    /// Handle a Remove op against all active runs and committed groups.
     fn handle_remove(&mut self, id: String, output: &mut Vec<TreeOperation>) {
-        match &mut self.active {
-            ActiveRun::Collecting { buffer, .. } => {
-                if let Some(pos) = buffer.iter().position(|(bid, _)| bid == &id) {
-                    trace!("Remove({id}): evicted from collecting buffer");
+        // Find the state that owns this id.
+        let owning_state_id: Option<String> = self.active.iter().find_map(|(sid, run)| {
+            let found = match run {
+                ActiveRun::Collecting { buffer, .. } => buffer.iter().any(|(bid, _)| bid == &id),
+                ActiveRun::Grouped {
+                    child_ids,
+                    thinking_buffer,
+                    container_id,
+                    ..
+                } => {
+                    thinking_buffer.iter().any(|(tid, _)| tid == &id)
+                        || child_ids.contains(&id)
+                        || container_id == &id
+                }
+            };
+            if found { Some(sid.clone()) } else { None }
+        });
+
+        if let Some(state_id) = owning_state_id {
+            let run = self.active.remove(&state_id).unwrap();
+            match run {
+                ActiveRun::Collecting {
+                    parent_id: cur_parent,
+                    mut buffer,
+                } => {
+                    let pos = buffer.iter().position(|(bid, _)| bid == &id).unwrap();
+                    trace!("Remove({id}): evicted from collecting buffer of state {state_id}");
                     buffer.remove(pos);
                     output.push(TreeOperation::Remove { id });
-                    return;
-                }
-            }
-            ActiveRun::Grouped {
-                container_id,
-                child_ids,
-                children,
-                thinking_buffer,
-                ..
-            } => {
-                // Remove from thinking_buffer if present; it was already emitted to the tree.
-                if let Some(pos) = thinking_buffer.iter().position(|(tid, _)| tid == &id) {
-                    trace!("Remove({id}): evicted from thinking_buffer");
-                    thinking_buffer.remove(pos);
-                    output.push(TreeOperation::Remove { id });
-                    return;
-                }
-                let container_id = container_id.clone();
-                if child_ids.remove(&id) {
-                    children.retain(|c| c.id != id);
-                    let remaining = child_ids.len();
-                    if remaining == 0 {
-                        debug!(
-                            "Remove({id}): last grouped child removed → removing container {container_id}, resetting to Collecting(idle)"
+                    if !buffer.is_empty() {
+                        self.active.insert(
+                            state_id,
+                            ActiveRun::Collecting {
+                                parent_id: cur_parent,
+                                buffer,
+                            },
                         );
-                        output.push(TreeOperation::Remove { id });
-                        output.push(TreeOperation::Remove {
-                            id: container_id.clone(),
-                        });
-                        self.active = ActiveRun::Collecting {
-                            parent_id: None,
-                            buffer: vec![],
-                        };
-                    } else {
-                        trace!(
-                            "Remove({id}): removed from grouped container {container_id} ({remaining} children remain)"
-                        );
-                        output.push(TreeOperation::Remove { id });
                     }
-                    return;
                 }
-                if id == container_id {
-                    debug!(
-                        "Remove({id}): container itself removed → resetting to Collecting(idle)"
-                    );
-                    self.active = ActiveRun::Collecting {
-                        parent_id: None,
-                        buffer: vec![],
-                    };
-                    output.push(TreeOperation::Remove { id });
-                    return;
+                ActiveRun::Grouped {
+                    group_idx,
+                    parent_id,
+                    container_id,
+                    mut children,
+                    mut child_ids,
+                    mut thinking_buffer,
+                } => {
+                    if let Some(pos) = thinking_buffer.iter().position(|(tid, _)| tid == &id) {
+                        trace!("Remove({id}): evicted from thinking_buffer of state {state_id}");
+                        thinking_buffer.remove(pos);
+                        output.push(TreeOperation::Remove { id });
+                        self.active.insert(
+                            state_id,
+                            ActiveRun::Grouped {
+                                group_idx,
+                                parent_id,
+                                container_id,
+                                children,
+                                child_ids,
+                                thinking_buffer,
+                            },
+                        );
+                    } else if child_ids.remove(&id) {
+                        children.retain(|c| c.id != id);
+                        let remaining = child_ids.len();
+                        if remaining == 0 {
+                            debug!(
+                                "Remove({id}): last grouped child removed → removing container {container_id}, resetting state {state_id} to idle"
+                            );
+                            output.push(TreeOperation::Remove { id });
+                            output.push(TreeOperation::Remove { id: container_id });
+                            // State becomes idle → don't reinsert.
+                        } else {
+                            trace!(
+                                "Remove({id}): removed from grouped container {container_id} of state {state_id} ({remaining} children remain)"
+                            );
+                            output.push(TreeOperation::Remove { id });
+                            self.active.insert(
+                                state_id,
+                                ActiveRun::Grouped {
+                                    group_idx,
+                                    parent_id,
+                                    container_id,
+                                    children,
+                                    child_ids,
+                                    thinking_buffer,
+                                },
+                            );
+                        }
+                    } else {
+                        // container_id == id
+                        debug!(
+                            "Remove({id}): container itself removed → resetting state {state_id} to idle"
+                        );
+                        output.push(TreeOperation::Remove { id });
+                        // State becomes idle → don't reinsert.
+                    }
                 }
             }
+            return;
         }
 
         // Check committed (sealed) groups.
@@ -298,11 +399,14 @@ impl ToolGrouper {
     }
 
     fn process_op(&mut self, op: TreeOperation, output: &mut Vec<TreeOperation>) {
-        trace!(
-            "process_op [{}]: {}",
-            active_state_name(&self.active),
-            op_summary(&op)
-        );
+        // Record ToolCall IDs before routing so that later ops in the same batch
+        // can identify sub-agent parents via known_tool_ids.
+        if let TreeOperation::Append { message, .. } = &op
+            && message.message_type == MessageType::ToolCall
+        {
+            self.known_tool_ids.insert(message.id.clone());
+        }
+
         match op {
             TreeOperation::Remove { id } => {
                 self.handle_remove(id, output);
@@ -316,14 +420,35 @@ impl ToolGrouper {
             _ => {}
         }
 
+        let state_id = self.find_state_for_op(&op);
+
+        trace!(
+            "process_op [state={state_id}, {}]: {}",
+            self.active
+                .get(&state_id)
+                .map(active_state_name)
+                .unwrap_or("Collecting(idle)"),
+            op_summary(&op)
+        );
+
+        self.process_state_op(state_id, op, output);
+    }
+
+    /// Run the Collecting/Grouped state machine for one state entry.
+    fn process_state_op(
+        &mut self,
+        state_id: String,
+        op: TreeOperation,
+        output: &mut Vec<TreeOperation>,
+    ) {
         let matched_group = self.find_matching_group(&op);
-        let current_active = std::mem::replace(
-            &mut self.active,
-            ActiveRun::Collecting {
+        let current_active = self
+            .active
+            .remove(&state_id)
+            .unwrap_or(ActiveRun::Collecting {
                 parent_id: None,
                 buffer: vec![],
-            },
-        );
+            });
 
         match current_active {
             ActiveRun::Collecting {
@@ -335,12 +460,11 @@ impl ToolGrouper {
                 // Thinking with an empty buffer: pass through (a run cannot start with a thinking).
                 if self.allow_thinking && is_thinking_append(&op) {
                     if buffer.is_empty() {
-                        trace!("Collecting(idle): thinking passes through (no active run)");
+                        trace!(
+                            "Collecting(idle) [state={state_id}]: thinking passes through (no active run)"
+                        );
                         output.push(op);
-                        self.active = ActiveRun::Collecting {
-                            parent_id: None,
-                            buffer,
-                        };
+                        // State stays idle, don't insert.
                     } else {
                         let TreeOperation::Append {
                             parent_id: op_parent,
@@ -351,7 +475,7 @@ impl ToolGrouper {
                         };
                         let id = message.id.clone();
                         trace!(
-                            "Collecting: thinking {id} emitted and buffered (buffer_len={})",
+                            "Collecting [state={state_id}]: thinking {id} emitted and buffered (buffer_len={})",
                             buffer.len() + 1
                         );
                         output.push(TreeOperation::Append {
@@ -359,10 +483,13 @@ impl ToolGrouper {
                             message: message.clone(),
                         });
                         buffer.push((id, message));
-                        self.active = ActiveRun::Collecting {
-                            parent_id: cur_parent,
-                            buffer,
-                        };
+                        self.active.insert(
+                            state_id,
+                            ActiveRun::Collecting {
+                                parent_id: cur_parent,
+                                buffer,
+                            },
+                        );
                     }
                     return;
                 }
@@ -382,7 +509,7 @@ impl ToolGrouper {
                         });
                         buffer.push((id.clone(), msg));
                         trace!(
-                            "Collecting: tool {id} appended to buffer (buffer_len={})",
+                            "Collecting [state={state_id}]: tool {id} appended to buffer (buffer_len={})",
                             buffer.len()
                         );
 
@@ -395,23 +522,29 @@ impl ToolGrouper {
                                 self.do_transition(g_idx, suffix);
                             let group_name = &self.groups[g_idx].name;
                             debug!(
-                                "Collecting→Grouped: container={container_id} group={group_name:?} children={}",
+                                "Collecting→Grouped [state={state_id}]: container={container_id} group={group_name:?} children={}",
                                 children.len()
                             );
                             output.extend(ops);
-                            self.active = ActiveRun::Grouped {
-                                group_idx: g_idx,
-                                parent_id: new_parent,
-                                container_id,
-                                children,
-                                child_ids,
-                                thinking_buffer: vec![],
-                            };
+                            self.active.insert(
+                                state_id,
+                                ActiveRun::Grouped {
+                                    group_idx: g_idx,
+                                    parent_id: new_parent,
+                                    container_id,
+                                    children,
+                                    child_ids,
+                                    thinking_buffer: vec![],
+                                },
+                            );
                         } else {
-                            self.active = ActiveRun::Collecting {
-                                parent_id: new_parent,
-                                buffer,
-                            };
+                            self.active.insert(
+                                state_id,
+                                ActiveRun::Collecting {
+                                    parent_id: new_parent,
+                                    buffer,
+                                },
+                            );
                         }
                     }
                     _ => {
@@ -431,9 +564,15 @@ impl ToolGrouper {
                                     msg.children.iter().map(|c| c.id.as_str())
                                 }))
                                 .collect();
-                        if is_run_related(&op, &buffer_ids) {
+                        // An Append whose parent_id is the state key itself is the
+                        // sub-agent's reply directed at this state — it must break the
+                        // run, not pass through as a run-related child op.
+                        let is_state_directed = matches!(&op,
+                            TreeOperation::Append { parent_id: Some(pid), .. } if pid == &state_id
+                        );
+                        if !is_state_directed && is_run_related(&op, &buffer_ids) {
                             trace!(
-                                "Collecting: run-related op passes through, buffer preserved (buffer_len={})",
+                                "Collecting [state={state_id}]: run-related op passes through, buffer preserved (buffer_len={})",
                                 buffer.len()
                             );
                             if let TreeOperation::Replace {
@@ -481,21 +620,24 @@ impl ToolGrouper {
                                 }
                             }
                             output.push(op);
-                            self.active = ActiveRun::Collecting {
-                                parent_id: cur_parent,
-                                buffer,
-                            };
+                            self.active.insert(
+                                state_id,
+                                ActiveRun::Collecting {
+                                    parent_id: cur_parent,
+                                    buffer,
+                                },
+                            );
                         } else {
                             // Non-matching op: clear the buffer (individual nodes stay ungrouped).
                             let buf_len = buffer.len();
                             if matched_group.is_some() {
                                 trace!(
-                                    "Collecting: non-matching parent breaks run (buffer_len={buf_len}), re-processing op as new run"
+                                    "Collecting [state={state_id}]: non-matching parent breaks run (buffer_len={buf_len}), re-processing op as new run"
                                 );
                                 self.process_op(op, output);
                             } else {
                                 trace!(
-                                    "Collecting: non-tool op breaks run (buffer_len={buf_len}), passing through"
+                                    "Collecting [state={state_id}]: non-tool op breaks run (buffer_len={buf_len}), passing through"
                                 );
                                 output.push(op);
                             }
@@ -526,7 +668,7 @@ impl ToolGrouper {
                     };
                     let id = message.id.clone();
                     trace!(
-                        "Grouped: thinking {id} emitted under container parent, held in thinking_buffer (len={})",
+                        "Grouped [state={state_id}]: thinking {id} emitted under container parent, held in thinking_buffer (len={})",
                         thinking_buffer.len() + 1
                     );
                     output.push(TreeOperation::Append {
@@ -534,14 +676,17 @@ impl ToolGrouper {
                         message: message.clone(),
                     });
                     thinking_buffer.push((id, message));
-                    self.active = ActiveRun::Grouped {
-                        group_idx,
-                        parent_id,
-                        container_id,
-                        children,
-                        child_ids,
-                        thinking_buffer,
-                    };
+                    self.active.insert(
+                        state_id,
+                        ActiveRun::Grouped {
+                            group_idx,
+                            parent_id,
+                            container_id,
+                            children,
+                            child_ids,
+                            thinking_buffer,
+                        },
+                    );
                     return;
                 }
 
@@ -553,7 +698,7 @@ impl ToolGrouper {
                         let pending_thinking = thinking_buffer.len();
                         if pending_thinking > 0 {
                             trace!(
-                                "Grouped: moving {pending_thinking} thinking node(s) into container {container_id}"
+                                "Grouped [state={state_id}]: moving {pending_thinking} thinking node(s) into container {container_id}"
                             );
                         }
                         for (tid, tmsg) in std::mem::take(&mut thinking_buffer) {
@@ -569,7 +714,7 @@ impl ToolGrouper {
                         child_ids.insert(id.clone());
                         children.push(msg.clone());
                         debug!(
-                            "Grouped: tool {id} appended to container {container_id} (children={})",
+                            "Grouped [state={state_id}]: tool {id} appended to container {container_id} (children={})",
                             children.len()
                         );
                         output.push(TreeOperation::Append {
@@ -589,14 +734,17 @@ impl ToolGrouper {
                                 group.shorten_as_glob,
                             ),
                         });
-                        self.active = ActiveRun::Grouped {
-                            group_idx,
-                            parent_id,
-                            container_id,
-                            children,
-                            child_ids,
-                            thinking_buffer,
-                        };
+                        self.active.insert(
+                            state_id,
+                            ActiveRun::Grouped {
+                                group_idx,
+                                parent_id,
+                                container_id,
+                                children,
+                                child_ids,
+                                thinking_buffer,
+                            },
+                        );
                     }
                     _ => {
                         // Before sealing: let Replace/child-Append ops for grouped children
@@ -612,9 +760,14 @@ impl ToolGrouper {
                                     .flat_map(|c| c.children.iter().map(|gc| gc.id.as_str())),
                             )
                             .collect();
-                        if is_run_related(&op, &child_id_refs) {
+                        // An Append whose parent_id is the state key itself is the
+                        // sub-agent's reply — it seals the state rather than passing through.
+                        let is_state_directed = matches!(&op,
+                            TreeOperation::Append { parent_id: Some(pid), .. } if pid == &state_id
+                        );
+                        if !is_state_directed && is_run_related(&op, &child_id_refs) {
                             trace!(
-                                "Grouped: run-related op passes through, container {container_id} intact"
+                                "Grouped [state={state_id}]: run-related op passes through, container {container_id} intact"
                             );
                             if let TreeOperation::Replace {
                                 ref id,
@@ -656,29 +809,33 @@ impl ToolGrouper {
                                 }
                             }
                             output.push(op);
-                            self.active = ActiveRun::Grouped {
-                                group_idx,
-                                parent_id,
-                                container_id,
-                                children,
-                                child_ids,
-                                thinking_buffer,
-                            };
+                            self.active.insert(
+                                state_id,
+                                ActiveRun::Grouped {
+                                    group_idx,
+                                    parent_id,
+                                    container_id,
+                                    children,
+                                    child_ids,
+                                    thinking_buffer,
+                                },
+                            );
                         } else {
                             // Non-matching: thinking_buffer items are already in the tree
                             // under the container's parent — nothing extra to emit.
                             let group_name = &self.groups[group_idx].name;
                             debug!(
-                                "Grouped→sealed: container={container_id} group={group_name:?} children={}",
+                                "Grouped→sealed [state={state_id}]: container={container_id} group={group_name:?} children={}",
                                 children.len()
                             );
                             let seal_op = self.do_seal(&container_id, &children, group_idx);
                             output.push(seal_op);
                             self.committed_groups.insert(container_id, child_ids);
+                            // State sealed → idle, don't insert.
                             // Start a fresh run if this op is itself a matching tool.
                             if matched_group.is_some() {
                                 trace!(
-                                    "Grouped: sealing op is itself a tool call, re-processing as new run"
+                                    "Grouped [state={state_id}]: sealing op is itself a tool call, re-processing as new run"
                                 );
                                 self.process_op(op, output);
                             } else {
@@ -706,10 +863,8 @@ impl Transform for ToolGrouper {
     }
 
     fn reset(&mut self) {
-        self.active = ActiveRun::Collecting {
-            parent_id: None,
-            buffer: vec![],
-        };
+        self.active.clear();
+        self.known_tool_ids.clear();
         self.committed_groups.clear();
     }
 }
@@ -790,6 +945,25 @@ fn extract_params_from_text(text: &Option<String>) -> Option<String> {
         None
     } else {
         Some(params.to_string())
+    }
+}
+
+/// Returns true if `run` contains or owns `id` (buffer/child IDs or their direct children).
+fn state_owns_id(run: &ActiveRun, id: &str) -> bool {
+    match run {
+        ActiveRun::Collecting { buffer, .. } => buffer
+            .iter()
+            .any(|(bid, msg)| bid == id || msg.children.iter().any(|c| c.id == id)),
+        ActiveRun::Grouped {
+            child_ids,
+            children,
+            ..
+        } => {
+            child_ids.contains(id)
+                || children
+                    .iter()
+                    .any(|c| c.children.iter().any(|gc| gc.id == id))
+        }
     }
 }
 
@@ -1882,6 +2056,262 @@ mod tests {
         assert!(
             out.iter().any(|op| is_append_to_parent(op, "t4", &cid)),
             "unrelated ToolCall Replace must not seal the container"
+        );
+    }
+
+    // ── sub-agent concurrent state tests ────────────────────────────────────
+
+    /// A tool call whose parent is another tool call (sub-agent scenario).
+    fn subagent_tool_op(id: &str, name: &str, parent_tool_id: &str) -> TreeOperation {
+        TreeOperation::Append {
+            parent_id: Some(parent_tool_id.to_string()),
+            message: MessageState::new(id)
+                .message_type(MessageType::ToolCall)
+                .text(format!("{name}: args")),
+        }
+    }
+
+    fn agent_message_op(id: &str, parent: &str) -> TreeOperation {
+        TreeOperation::Append {
+            parent_id: Some(parent.to_string()),
+            message: MessageState::new(id).message_type(MessageType::AgentMessage),
+        }
+    }
+
+    #[test]
+    fn subagent_tools_form_independent_container() {
+        // tc1 is a normal tool call in the "default" state.
+        // st1, st2, st3 are sub-agent tool calls (parent = tc1).
+        // They should form their own container in state "tc1", independently of default.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        // tc1 goes to default state (parent = None, not a known tool call parent).
+        let b1 = grouper.process(vec![tool_op("tc1", "agent")]);
+        assert_eq!(b1.len(), 1);
+        assert!(is_append_id(&b1[0], "tc1"));
+
+        // Sub-agent tools — parent = tc1, which is now in known_tool_ids.
+        let b2 = grouper.process(vec![
+            subagent_tool_op("st1", "read", "tc1"),
+            subagent_tool_op("st2", "write", "tc1"),
+            subagent_tool_op("st3", "exec", "tc1"),
+        ]);
+
+        // All three sub-agent tools are emitted.
+        assert!(b2.iter().any(|op| is_append_id(op, "st1")));
+        assert!(b2.iter().any(|op| is_append_id(op, "st2")));
+        assert!(b2.iter().any(|op| is_append_id(op, "st3")));
+
+        // A container must have formed (min_count=3 reached).
+        assert!(
+            b2.iter()
+                .any(|op| matches!(op, TreeOperation::Replace { message, .. } if message.id.starts_with("tool_group:"))),
+            "sub-agent tools should form a container"
+        );
+
+        // The default state must NOT have been affected (tc1 is still the only item there).
+        // Verify: a user_op seals only the default state (no sub-agent container seal).
+        let b3 = grouper.process(vec![user_op("u1")]);
+        // u1 should pass through; no extra Replace for tc1's container.
+        assert!(b3.iter().any(|op| is_append_id(op, "u1")));
+    }
+
+    #[test]
+    fn default_and_subagent_run_interleaved() {
+        // Default run (tc1, t1, t2) and sub-agent run (st1, st2, st3) are interleaved.
+        // Both should produce containers independently.
+        //
+        // Note: tc1 goes to the "default" state and counts toward its min_count.
+        // The default container therefore forms when t2 arrives (tc1 + t1 + t2 = 3),
+        // and its Replace targets "tc1" (the first item in the default buffer).
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        // tc1 goes to default (buffer=[tc1]).
+        grouper.process(vec![tool_op("tc1", "agent")]);
+
+        // Interleave: one from default, one from sub-agent.
+        let b1 = grouper.process(vec![tool_op("t1", "read")]);
+        assert!(is_append_id(&b1[0], "t1")); // default buffer=[tc1, t1]
+
+        let b2 = grouper.process(vec![subagent_tool_op("st1", "read", "tc1")]);
+        assert!(is_append_id(&b2[0], "st1")); // sub-agent buffer=[st1]
+
+        let b3 = grouper.process(vec![subagent_tool_op("st2", "write", "tc1")]);
+        assert!(is_append_id(&b3[0], "st2")); // sub-agent buffer=[st1, st2]
+
+        // t2 is the 3rd tool in the default state (tc1 + t1 + t2) → default container forms.
+        let b4 = grouper.process(vec![tool_op("t2", "write")]);
+        let default_cid = b4
+            .iter()
+            .find(|op| is_replace_from(op, "tc1")) // tc1 is first in the default buffer
+            .and_then(container_id_from_replace)
+            .expect("default container must form when tc1+t1+t2 reaches min_count");
+
+        // st3 is the 3rd sub-agent tool → sub-agent container forms.
+        let b5 = grouper.process(vec![subagent_tool_op("st3", "exec", "tc1")]);
+        let subagent_cid = b5
+            .iter()
+            .find(|op| {
+                matches!(op, TreeOperation::Replace { message, .. }
+                    if message.id.starts_with("tool_group:") && message.id != default_cid)
+            })
+            .and_then(container_id_from_replace)
+            .expect("sub-agent container must form when st1+st2+st3 reaches min_count");
+
+        assert_ne!(default_cid, subagent_cid, "containers must be distinct");
+    }
+
+    #[test]
+    fn subagent_state_seals_on_agent_message_reply() {
+        // The sub-agent's AgentMessage reply arrives with parent_id = tc1 (the sub-agent
+        // tool call). This should seal the sub-agent state via direct key match (Check 1).
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        grouper.process(vec![tool_op("tc1", "agent")]);
+        let b1 = grouper.process(vec![
+            subagent_tool_op("st1", "read", "tc1"),
+            subagent_tool_op("st2", "write", "tc1"),
+            subagent_tool_op("st3", "exec", "tc1"),
+        ]);
+        let sub_cid = b1
+            .iter()
+            .find(|op| {
+                matches!(op, TreeOperation::Replace { message, .. }
+                    if message.id.starts_with("tool_group:"))
+            })
+            .and_then(container_id_from_replace)
+            .expect("sub-agent container must form");
+
+        // Sub-agent reply seals the sub-agent state.
+        let b2 = grouper.process(vec![agent_message_op("reply1", "tc1")]);
+        assert!(
+            b2.iter().any(|op| is_replace_from(op, &sub_cid)),
+            "sub-agent state must be sealed when AgentMessage reply arrives"
+        );
+        assert!(b2.iter().any(|op| is_append_id(op, "reply1")));
+    }
+
+    #[test]
+    fn subagent_toolresult_does_not_seal_subagent_state() {
+        // ToolResults for sub-agent children (parent = st1) must pass through
+        // without sealing the sub-agent state.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        grouper.process(vec![tool_op("tc1", "agent")]);
+        let b1 = grouper.process(vec![
+            subagent_tool_op("st1", "read", "tc1"),
+            subagent_tool_op("st2", "write", "tc1"),
+            subagent_tool_op("st3", "exec", "tc1"),
+        ]);
+        let sub_cid = b1
+            .iter()
+            .find(|op| {
+                matches!(op, TreeOperation::Replace { message, .. }
+                    if message.id.starts_with("tool_group:"))
+            })
+            .and_then(container_id_from_replace)
+            .expect("sub-agent container must form");
+
+        // ToolResult for st1 — must NOT seal the sub-agent container.
+        let b2 = grouper.process(vec![result_op("sr1", "st1")]);
+        assert!(
+            !b2.iter().any(|op| is_replace_from(op, &sub_cid)),
+            "ToolResult for sub-agent child must not seal the sub-agent container"
+        );
+
+        // Sub-agent container should still accept another tool.
+        let b3 = grouper.process(vec![subagent_tool_op("st4", "grep", "tc1")]);
+        assert!(
+            b3.iter().any(|op| is_append_to_parent(op, "st4", &sub_cid)),
+            "sub-agent container should still accept more tools"
+        );
+    }
+
+    #[test]
+    fn reset_clears_all_states() {
+        // After reset(), all states are cleared and a subsequent run starts fresh.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        // Build up both default and sub-agent states.
+        grouper.process(vec![tool_op("tc1", "agent")]);
+        grouper.process(vec![tool_op("t1", "read"), tool_op("t2", "write")]);
+        grouper.process(vec![
+            subagent_tool_op("st1", "read", "tc1"),
+            subagent_tool_op("st2", "write", "tc1"),
+        ]);
+
+        grouper.reset();
+
+        // After reset, a fresh run of 3 tools should form a new container.
+        // IDs overlap with previous session intentionally.
+        let b1 = grouper.process(vec![
+            tool_op("t1", "read"),
+            tool_op("t2", "write"),
+            tool_op("t3", "exec"),
+        ]);
+        assert!(
+            b1.iter().any(|op| is_replace_from(op, "t1")),
+            "fresh run after reset must form a container"
+        );
+
+        // known_tool_ids is also cleared: tc1 is no longer a known sub-agent parent.
+        // A tool with parent_id = "tc1" should NOT go to sub-agent state.
+        let b2 = grouper.process(vec![subagent_tool_op("st1", "read", "tc1")]);
+        // It should be treated as a child Append of "tc1" (an unknown parent) and just pass through.
+        assert_eq!(b2.len(), 1);
+        assert!(is_append_id(&b2[0], "st1"));
+    }
+
+    #[test]
+    fn remove_targets_correct_state_not_other() {
+        // Remove of a child in one state must not affect the other state.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+
+        grouper.process(vec![tool_op("tc1", "agent")]);
+        // Build sub-agent container.
+        let b1 = grouper.process(vec![
+            subagent_tool_op("st1", "read", "tc1"),
+            subagent_tool_op("st2", "write", "tc1"),
+            subagent_tool_op("st3", "exec", "tc1"),
+        ]);
+        let sub_cid = b1
+            .iter()
+            .find(|op| {
+                matches!(op, TreeOperation::Replace { message, .. }
+                    if message.id.starts_with("tool_group:"))
+            })
+            .and_then(container_id_from_replace)
+            .expect("sub-agent container must form");
+
+        // Also build default container.
+        // Note: tc1 is already in the default buffer (added in step 1), so the container
+        // forms when t2 arrives (tc1 + t1 + t2 = 3). The Replace targets "tc1".
+        let b2 = grouper.process(vec![
+            tool_op("t1", "read"),
+            tool_op("t2", "write"),
+            tool_op("t3", "exec"),
+        ]);
+        let default_cid = b2
+            .iter()
+            .find(|op| is_replace_from(op, "tc1"))
+            .and_then(container_id_from_replace)
+            .expect("default container must form");
+
+        // Seal both.
+        grouper.process(vec![user_op("u1")]);
+        grouper.process(vec![agent_message_op("reply1", "tc1")]);
+
+        // Remove a child from sub-agent container.
+        let out = grouper.process(vec![remove_op("st2")]);
+        assert!(out.iter().any(|op| is_remove_id(op, "st2")));
+        // Default container must NOT be affected.
+        assert!(
+            !out.iter().any(|op| is_remove_id(op, &default_cid)),
+            "removing sub-agent child must not remove default container"
+        );
+        assert!(
+            !out.iter().any(|op| is_remove_id(op, &sub_cid)),
+            "sub-agent container should not be removed (still has st1, st3)"
         );
     }
 
