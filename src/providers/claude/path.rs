@@ -78,22 +78,44 @@ impl MessagePath {
         }
 
         if self.active_path.contains(node.uuid) {
+            debug!(
+                node.uuid,
+                parent_uuid = node.parent_uuid,
+                byte_offset = node.byte_offset,
+                is_tool_result = node.is_tool_result,
+                "backward: node already on active_path, marking offset and chaining parent"
+            );
             self.initial_active_offsets.insert(node.byte_offset);
             if let Some(p) = node.parent_uuid {
                 self.active_path.insert(p.to_string());
             }
         } else if self.active_tail.is_none() && !node.is_tool_result {
+            debug!(
+                node.uuid,
+                parent_uuid = node.parent_uuid,
+                byte_offset = node.byte_offset,
+                "backward: setting active_tail and chaining parent"
+            );
             self.active_tail = Some(node.uuid.to_string());
             self.active_path.insert(node.uuid.to_string());
             self.initial_active_offsets.insert(node.byte_offset);
             if let Some(p) = node.parent_uuid {
                 self.active_path.insert(p.to_string());
             }
+        } else {
+            debug!(
+                node.uuid,
+                parent_uuid = node.parent_uuid,
+                byte_offset = node.byte_offset,
+                is_tool_result = node.is_tool_result,
+                active_tail = ?self.active_tail,
+                "backward: skipping node (not on active_path, active_tail already set or is_tool_result)"
+            );
         }
     }
 
     pub fn forward(&mut self, node: &MessageNode) -> ForwardPathResult {
-        match node.parent_uuid {
+        let result = match node.parent_uuid {
             Some(p) if !p.is_empty() => {
                 if node.is_tool_result {
                     if self.is_dangling(p) {
@@ -152,7 +174,19 @@ impl MessagePath {
                     ForwardPathResult::Drop
                 }
             }
-        }
+        };
+        debug!(
+            node.uuid,
+            parent_uuid = node.parent_uuid,
+            byte_offset = node.byte_offset,
+            is_tool_result = node.is_tool_result,
+            in_initial_active_offsets = self.initial_active_offsets.contains(&node.byte_offset),
+            initial_offset = ?self.initial_offset,
+            active_tail = ?self.active_tail,
+            result = ?result,
+            "forward"
+        );
+        result
     }
 
     pub fn reset(&mut self) {

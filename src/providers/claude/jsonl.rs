@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use serde_json::Value;
+use tracing::{debug, trace};
 
 /// A stateful JSONL reader that re-orders entries so that a parent UUID is
 /// always emitted before any child that references it.
@@ -50,6 +51,13 @@ impl JsonlReader {
         loop {
             // Drain the ready queue first.
             if let Some((offset, value)) = self.queued.pop_front() {
+                let uuid = value["uuid"].as_str().unwrap_or("<none>");
+                debug!(
+                    uuid,
+                    byte_offset = offset,
+                    queued_remaining = self.queued.len(),
+                    "try_recv: emitting from queue"
+                );
                 self.on_emit(&value);
                 return Ok(Some((offset, value)));
             }
@@ -60,12 +68,17 @@ impl JsonlReader {
 
             if line_byte_len == 0 {
                 // EOF.
+                trace!(byte_offset = self.byte_offset, "try_recv: EOF");
                 return Ok(None);
             }
 
             if !(line.ends_with('\n') || line.ends_with('\r')) {
                 // Incomplete line — seek back so it is re-read when the writer
                 // appends the rest.
+                debug!(
+                    byte_offset = self.byte_offset,
+                    "try_recv: incomplete line, seeking back"
+                );
                 self.reader.seek(SeekFrom::Start(self.byte_offset as u64))?;
                 return Ok(None);
             }
@@ -83,6 +96,7 @@ impl JsonlReader {
                 continue;
             };
 
+            let uuid = value["uuid"].as_str().unwrap_or("<none>");
             let parent_uuid = self.extract_parent_uuid(&value);
 
             if parent_uuid
@@ -90,13 +104,26 @@ impl JsonlReader {
                 .is_none_or(|p| self.seen_uuids.contains(p))
             {
                 // Parent is known (or absent) — emit directly.
+                debug!(
+                    uuid,
+                    byte_offset = offset,
+                    parent_uuid = parent_uuid.as_deref().unwrap_or("<none>"),
+                    "try_recv: emitting from disk (parent known)"
+                );
                 self.on_emit(&value);
                 return Ok(Some((offset, value)));
             }
 
             // Parent not yet seen — buffer under the parent UUID.
+            let parent = parent_uuid.unwrap();
+            debug!(
+                uuid,
+                byte_offset = offset,
+                parent_uuid = parent.as_str(),
+                "try_recv: buffering (parent not yet seen)"
+            );
             self.unresolved_messages
-                .entry(parent_uuid.unwrap())
+                .entry(parent)
                 .or_default()
                 .push((offset, value));
         }
@@ -111,6 +138,11 @@ impl JsonlReader {
         }
         self.seen_uuids.insert(uuid.to_string());
         if let Some(children) = self.unresolved_messages.remove(uuid) {
+            debug!(
+                uuid,
+                children = children.len(),
+                "on_emit: releasing buffered children to queue"
+            );
             self.queued.extend(children);
         }
     }

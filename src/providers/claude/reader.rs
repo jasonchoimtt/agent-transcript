@@ -4,7 +4,7 @@ use std::time::Duration;
 use color_eyre::eyre::bail;
 use notify::Watcher as _;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::jsonl::JsonlReader;
 use super::message::{ParseState, parse_entry_cb};
@@ -211,15 +211,43 @@ impl ClaudeReader {
         // Collect UUID-bearing entries up to the waterfall limit.
         let mut entries: Vec<(usize, serde_json::Value)> = Vec::new();
         let limit_cap = self.waterfall_message_limit;
+        debug!(limit = limit_cap, "do_initial_read: collecting entries");
         loop {
             match self.jsonl_reader.try_recv()? {
-                None => break,
+                None => {
+                    debug!(
+                        collected = entries.len(),
+                        byte_offset = self.jsonl_reader.byte_offset,
+                        queued = self.jsonl_reader.queued.len(),
+                        "do_initial_read: try_recv returned None (EOF or incomplete line)"
+                    );
+                    break;
+                }
                 Some((offset, value)) => {
-                    if value["uuid"].as_str().is_some() {
+                    let uuid = value["uuid"].as_str().map(|s| s.to_string());
+                    if let Some(ref u) = uuid {
                         entries.push((offset, value));
+                        debug!(
+                            uuid = u.as_str(),
+                            byte_offset = offset,
+                            collected = entries.len(),
+                            limit = limit_cap,
+                            "do_initial_read: collected UUID-bearing entry"
+                        );
                         if entries.len() >= limit_cap {
+                            debug!(
+                                limit = limit_cap,
+                                byte_offset = self.jsonl_reader.byte_offset,
+                                queued = self.jsonl_reader.queued.len(),
+                                "do_initial_read: limit reached, stopping"
+                            );
                             break;
                         }
+                    } else {
+                        trace!(
+                            byte_offset = offset,
+                            "do_initial_read: skipping non-UUID entry"
+                        );
                     }
                 }
             }
@@ -277,21 +305,41 @@ impl ClaudeReader {
 
     /// Drain new entries from `self.jsonl_reader`, parse them, and handle rewinding.
     /// In waterfall mode, processes exactly one entry per call.
-    /// Returns ops to emit; an empty vec means nothing new or a recoverable error.
-    fn handle_main_event(&mut self) -> color_eyre::Result<Vec<ReaderOp>> {
+    /// Returns `(ops, consumed)` where `consumed` is true if at least one entry was read
+    /// (from disk or the reorder queue). An empty ops vec with consumed=false means no new data.
+    fn handle_main_event(&mut self) -> color_eyre::Result<(Vec<ReaderOp>, bool)> {
         let mut new_ops: Vec<ReaderOp> = Vec::new();
         let mut rewind_detected = false;
         let mut rewind_id: Option<String> = None;
         let mut processed_any = false;
 
+        debug!(
+            byte_offset = self.jsonl_reader.byte_offset,
+            queued = self.jsonl_reader.queued.len(),
+            "handle_main_event: enter"
+        );
+
         loop {
             match self.jsonl_reader.try_recv()? {
                 None => {
-                    debug!("no more complete lines");
+                    debug!(
+                        byte_offset = self.jsonl_reader.byte_offset,
+                        queued = self.jsonl_reader.queued.len(),
+                        "handle_main_event: no more complete lines"
+                    );
                     break;
                 }
                 Some((offset, value)) => {
+                    let uuid = value["uuid"].as_str().map(|s| s.to_string());
                     let json_str = serde_json::to_string(&value).unwrap_or_default();
+
+                    debug!(
+                        uuid = uuid.as_deref().unwrap_or("<none>"),
+                        byte_offset = offset,
+                        reader_byte_offset = self.jsonl_reader.byte_offset,
+                        queued = self.jsonl_reader.queued.len(),
+                        "handle_main_event: got entry"
+                    );
 
                     let mut should_ingest = true;
                     if let Some(node) = value_to_message_node(&value, offset) {
@@ -333,6 +381,11 @@ impl ClaudeReader {
 
                     // In waterfall mode, process exactly one entry per call.
                     if self.waterfall {
+                        debug!(
+                            byte_offset = self.jsonl_reader.byte_offset,
+                            queued = self.jsonl_reader.queued.len(),
+                            "handle_main_event: waterfall break after one entry"
+                        );
                         break;
                     }
                 }
@@ -364,7 +417,7 @@ impl ClaudeReader {
             self.waterfall_message_limit = self.waterfall_message_limit.saturating_add(1);
         }
 
-        Ok(new_ops)
+        Ok((new_ops, processed_any || rewind_detected))
     }
 
     /// Emit the initial ops, then drive the main event loop.
@@ -389,20 +442,43 @@ impl ClaudeReader {
 
         if snapshot && self.waterfall {
             // Waterfall + snapshot: drive handle_main_event until all entries are exhausted.
-            // Break when byte_offset stops advancing AND the queued buffer is empty (no new bytes
-            // or unrecoverable parse error), not when ops is empty — some entries (e.g.
-            // system/local_command) produce no ops.
+            // Break when handle_main_event consumed nothing (neither disk nor reorder queue had
+            // data). Checking `consumed` is correct even when queued entries are drained without
+            // advancing byte_offset — the offset/queue heuristic would terminate prematurely in
+            // that case.
+            let mut iteration = 0usize;
             loop {
+                iteration += 1;
                 let prev_offset = self.jsonl_reader.byte_offset;
-                let ops = self.handle_main_event()?;
+                let prev_queued = self.jsonl_reader.queued.len();
+                debug!(
+                    iteration,
+                    prev_offset, prev_queued, "waterfall+snapshot loop: calling handle_main_event"
+                );
+                let (ops, consumed) = self.handle_main_event()?;
+                let new_offset = self.jsonl_reader.byte_offset;
+                let new_queued = self.jsonl_reader.queued.len();
+                debug!(
+                    iteration,
+                    prev_offset,
+                    new_offset,
+                    ops = ops.len(),
+                    consumed,
+                    prev_queued,
+                    new_queued,
+                    "waterfall+snapshot loop: handle_main_event returned"
+                );
                 for op in ops {
                     if tx.send(Ok(op)).await.is_err() {
                         return Ok(());
                     }
                 }
-                if self.jsonl_reader.byte_offset == prev_offset
-                    && self.jsonl_reader.queued.is_empty()
-                {
+                if !consumed {
+                    debug!(
+                        iteration,
+                        byte_offset = self.jsonl_reader.byte_offset,
+                        "waterfall+snapshot loop: terminating (nothing consumed)"
+                    );
                     break;
                 }
             }
@@ -411,7 +487,7 @@ impl ClaudeReader {
 
         if snapshot {
             // Run one iteration of handle_main_event to catch bytes written after initial read.
-            let ops = self.handle_main_event()?;
+            let (ops, _) = self.handle_main_event()?;
             for op in ops {
                 if tx.send(Ok(op)).await.is_err() {
                     return Ok(());
@@ -439,7 +515,7 @@ impl ClaudeReader {
                     }
                     debug!("debounce complete");
 
-                    let ops = self.handle_main_event()?;
+                    let (ops, _) = self.handle_main_event()?;
                     debug!(ops = ops.len(), "sending incremental ops");
                     for op in ops {
                         if tx.send(Ok(op)).await.is_err() {
