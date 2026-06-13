@@ -1,0 +1,3 @@
+[workspace]
+# GitHub releases are handled by cargo-dist (triggered after release-plz creates the tag)
+git_release_enable = false
