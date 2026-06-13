@@ -5,6 +5,8 @@
 
 agt is a transcript TUI and agent CLI combined into one. 
 
+![Demo](./docs/demo.gif)
+
 ## About agt
 
 **Features**:
