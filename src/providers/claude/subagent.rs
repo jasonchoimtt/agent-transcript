@@ -93,15 +93,6 @@ impl ClaudeSubagentManager {
             .find(|(_, w)| w.description.as_deref() == Some(description) && w.tool_use_id.is_none())
             .map(|(id, _)| id.clone());
 
-        for (_, sa) in self.subagents.iter() {
-            info!(
-                "dbg {:?} {:?} {:?}",
-                sa.description,
-                sa.description.as_deref() == Some(description),
-                sa.tool_use_id
-            );
-        }
-
         info!("matching agent_id: {:?}", agent_id);
 
         let Some(agent_id) = agent_id else {

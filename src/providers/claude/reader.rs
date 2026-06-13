@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,6 +62,9 @@ struct ClaudeReader {
     /// In waterfall/initial_loaded mode, the max number of UUID-bearing JSONL entries to process.
     /// `usize::MAX` means no limit (process all).
     waterfall_message_limit: usize,
+    /// All UUIDs seen by the path tracker (Ingest, Drop, or Rewind) across the entire
+    /// waterfall+snapshot run. Used to detect entries the loop never reached.
+    waterfall_ingested_uuids: HashSet<String>,
 }
 
 impl ClaudeReader {
@@ -116,7 +120,7 @@ impl ClaudeReader {
             debug!("waiting for jsonl file to be created");
             match watcher_rx.recv().await {
                 Some(()) => {}
-                None => color_eyre::eyre::bail!("watcher channel closed before jsonl was created"),
+                None => bail!("watcher channel closed before jsonl was created"),
             }
         }
 
@@ -187,6 +191,7 @@ impl ClaudeReader {
             initial_ops: Vec::new(),
             waterfall,
             waterfall_message_limit,
+            waterfall_ingested_uuids: std::collections::HashSet::new(),
         };
 
         let initial_ops = reader.do_initial_read()?;
@@ -287,6 +292,9 @@ impl ClaudeReader {
                             }
                         },
                     )?);
+                    if self.waterfall {
+                        self.waterfall_ingested_uuids.insert(node.uuid.to_string());
+                    }
                 }
                 ForwardPathResult::Rewind => {
                     bail!(
@@ -312,6 +320,7 @@ impl ClaudeReader {
         let mut rewind_detected = false;
         let mut rewind_id: Option<String> = None;
         let mut processed_any = false;
+        let mut processed_uuid_bearing = false;
 
         debug!(
             byte_offset = self.jsonl_reader.byte_offset,
@@ -341,8 +350,12 @@ impl ClaudeReader {
                         "handle_main_event: got entry"
                     );
 
+                    processed_any = true;
+                    processed_uuid_bearing = uuid.is_some();
+
                     let mut should_ingest = true;
                     if let Some(node) = value_to_message_node(&value, offset) {
+                        self.waterfall_ingested_uuids.insert(node.uuid.to_string());
                         should_ingest = match self.message_path.forward(&node) {
                             ForwardPathResult::Ingest => true,
                             ForwardPathResult::Rewind => {
@@ -376,8 +389,6 @@ impl ClaudeReader {
                             .map(ReaderOp::Tree),
                         );
                     }
-
-                    processed_any = true;
 
                     // In waterfall mode, process exactly one entry per call.
                     if self.waterfall {
@@ -413,7 +424,8 @@ impl ClaudeReader {
                 }
                 Err(e) => warn!("re-read after rewind error: {}", e),
             }
-        } else if self.waterfall && processed_any {
+        }
+        if self.waterfall && processed_uuid_bearing {
             self.waterfall_message_limit = self.waterfall_message_limit.saturating_add(1);
         }
 
@@ -481,6 +493,18 @@ impl ClaudeReader {
                     );
                     break;
                 }
+            }
+            let mut missing = Vec::new();
+            let mut rereader = JsonlReader::new(&self.jsonl_path).unwrap();
+            while let Some((_, message)) = rereader.try_recv()? {
+                if let Some(uuid) = message["uuid"].as_str() {
+                    if !self.waterfall_ingested_uuids.contains(uuid) {
+                        missing.push(uuid.to_string());
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                color_eyre::eyre::bail!("Not all messages were ingested: missing {:?}", missing);
             }
             return Ok(());
         }
@@ -1013,6 +1037,7 @@ mod tests {
             initial_ops: Vec::new(),
             waterfall: false,
             waterfall_message_limit: usize::MAX,
+            waterfall_ingested_uuids: HashSet::new(),
         };
 
         let ops = reader.do_initial_read().unwrap();
@@ -1251,6 +1276,7 @@ mod tests {
             initial_ops: Vec::new(),
             waterfall: false,
             waterfall_message_limit: usize::MAX,
+            waterfall_ingested_uuids: HashSet::new(),
         };
 
         let _ = reader.do_initial_read().unwrap();
@@ -1531,6 +1557,7 @@ mod tests {
             initial_ops: Vec::new(),
             waterfall: false,
             waterfall_message_limit: usize::MAX,
+            waterfall_ingested_uuids: HashSet::new(),
         }
     }
 

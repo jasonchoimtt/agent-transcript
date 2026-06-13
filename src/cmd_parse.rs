@@ -45,7 +45,7 @@ pub async fn run(
             },
         )
         .await?;
-    drain_transform_print(&mut reader, config, &provider, use_color, debug_transform).await;
+    drain_transform_print(&mut reader, config, &provider, use_color, debug_transform).await?;
 
     Ok(())
 }
@@ -56,13 +56,15 @@ async fn drain_transform_print(
     provider: &ProviderKind,
     use_color: bool,
     debug_transform: Option<&str>,
-) {
+) -> color_eyre::Result<()> {
     let mut raw_ops = Vec::new();
+    let mut result = Ok(());
     while let Some(item) = reader.updates().recv().await {
         match item {
             Ok(op) => raw_ops.push(op),
             Err(e) => {
                 eprintln!("reader error: {e:#}");
+                result = Err(e);
                 break;
             }
         }
@@ -117,6 +119,8 @@ async fn drain_transform_print(
         print_node(node, 0, use_color);
         println!();
     }
+
+    result
 }
 
 // ── Debug transform wrapper ───────────────────────────────────────────────────
