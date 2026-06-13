@@ -1,5 +1,8 @@
 # agt - Agent and transcript
 
+![GitHub Release](https://img.shields.io/github/v/release/jasonchoimtt/agent-transcript)
+![Crates.io Version](https://img.shields.io/crates/v/agent-transcript)
+
 agt is a transcript TUI and agent CLI combined into one. 
 
 ## About agt
