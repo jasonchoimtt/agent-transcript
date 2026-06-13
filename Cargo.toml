@@ -5,10 +5,23 @@ path = "src/main.rs"
 [package]
 name = "agent-transcript"
 version = "0.1.0"
-description = "agt"
+description = "Agent and transcript TUI"
 authors = ["Jason Choi <jasonchoi.mtt@gmail.com>"]
 license = "GPL-3.0-or-later"
+homepage = "https://github.com/jasonchoimtt/agent-transcript"
+repository = "https://github.com/jasonchoimtt/agent-transcript"
+readme = "README.md"
+keywords = [
+    "claude",
+    "cursor",
+    "agent",
+    "transcript",
+    "ai",
+]
+categories = ["command-line-utilities"]
 edition = "2024"
+
+include = ["src/", "LICENSE", "README.md"]
 
 [dependencies]
 async-trait = "0.1"
