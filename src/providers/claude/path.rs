@@ -14,25 +14,25 @@ use tracing::{debug, info, warn};
 /// determines the current message fork. All messages on the path from the root
 /// to the active tail should be parsed.
 ///
-/// However, there is a complication with regards to tool results: These
-/// messages do not always lie on the path from the root; instead, they may
-/// dangle from a message on the active path. This is a quirk due to the
+/// However, there is a complication with regards to tool results and tool uses:
+/// These messages do not always lie on the path from the root; instead, they
+/// may dangle from a message on the active path. This is a quirk due to the
 /// implementation of parallel tool calls.
 ///
 /// Another complication: The message IDs are not unique, when compaction
 /// boundaries are involved. Hence, during the initial read, messages should be
 /// identified by byte offsets rather than message IDs.
 pub struct MessagePath {
-    /// UUIDs on the active path; excludes tool results which may dangle from
-    /// the active path.
+    /// UUIDs on the active path; includes dangling tool_use / tool_result nodes
+    /// (which may not lie on the root-to-tail chain due to parallel tool calls).
     pub active_path: HashSet<String>,
 
-    /// tool_result UUID → its parent UUID; lets can_reach_tail traverse
-    /// parallel results.
-    pub active_tool_results: HashMap<String, String>,
+    /// can_dangle UUID → its parent UUID; lets can_reach_tail traverse
+    /// parallel tool call chains.
+    pub dangling_nodes: HashMap<String, String>,
 
-    /// Tip of the active path (last non-tool-result UUID); new non-tool-result
-    /// entries must chain from this UUID directly or via active_tool_results.
+    /// Tip of the active path (last non-can_dangle UUID); new non-can_dangle
+    /// entries must chain from this UUID directly or via dangling_nodes.
     pub active_tail: Option<String>,
 
     /// Byte offset of the first message read by the backward pass
@@ -49,7 +49,11 @@ pub struct MessagePath {
 pub struct MessageNode<'a> {
     pub uuid: &'a str,
     pub parent_uuid: Option<&'a str>,
-    pub is_tool_result: bool,
+    /// True for entries that may legitimately dangle off the active path without
+    /// advancing the tail — i.e. tool_use and tool_result messages. These go
+    /// through `is_dangling` rather than `can_reach_tail` so that parallel tool
+    /// call chains and conversation forks are handled correctly.
+    pub can_dangle: bool,
     pub byte_offset: usize,
 }
 
@@ -64,7 +68,7 @@ impl MessagePath {
     pub fn new() -> Self {
         Self {
             active_path: HashSet::new(),
-            active_tool_results: HashMap::new(),
+            dangling_nodes: HashMap::new(),
             active_tail: None,
             initial_offset: None,
             initial_active_offsets: HashSet::new(),
@@ -82,14 +86,14 @@ impl MessagePath {
                 node.uuid,
                 parent_uuid = node.parent_uuid,
                 byte_offset = node.byte_offset,
-                is_tool_result = node.is_tool_result,
+                can_dangle = node.can_dangle,
                 "backward: node already on active_path, marking offset and chaining parent"
             );
             self.initial_active_offsets.insert(node.byte_offset);
             if let Some(p) = node.parent_uuid {
                 self.active_path.insert(p.to_string());
             }
-        } else if self.active_tail.is_none() && !node.is_tool_result {
+        } else if self.active_tail.is_none() && !node.can_dangle {
             debug!(
                 node.uuid,
                 parent_uuid = node.parent_uuid,
@@ -107,9 +111,9 @@ impl MessagePath {
                 node.uuid,
                 parent_uuid = node.parent_uuid,
                 byte_offset = node.byte_offset,
-                is_tool_result = node.is_tool_result,
+                can_dangle = node.can_dangle,
                 active_tail = ?self.active_tail,
-                "backward: skipping node (not on active_path, active_tail already set or is_tool_result)"
+                "backward: skipping node (not on active_path, active_tail already set or can_dangle)"
             );
         }
     }
@@ -117,17 +121,20 @@ impl MessagePath {
     pub fn forward(&mut self, node: &MessageNode) -> ForwardPathResult {
         let result = match node.parent_uuid {
             Some(p) if !p.is_empty() => {
-                if node.is_tool_result {
+                if node.can_dangle {
                     if self.is_dangling(p) {
-                        // Tool results: Do not add to active_tail yet, since it may be a
-                        // parallel tool result that may or may not become a leaf.
+                        // Tool uses/results: do not advance the non-dangle tail yet,
+                        // since this may be a parallel entry. Instead, advance
+                        // active_tail to this entry when its parent reaches the current
+                        // tail — that blocks direct non-dangle siblings from being
+                        // accepted as continuations (they must thread through here).
                         debug!(
                             node.uuid,
                             parent_uuid = p,
-                            "tool_result, adding to active_tool_results"
+                            "can_dangle entry, adding to dangling_nodes"
                         );
                         self.active_path.insert(node.uuid.to_string());
-                        self.active_tool_results
+                        self.dangling_nodes
                             .insert(node.uuid.to_string(), p.to_string());
                         ForwardPathResult::Ingest
                     } else {
@@ -179,7 +186,7 @@ impl MessagePath {
             node.uuid,
             parent_uuid = node.parent_uuid,
             byte_offset = node.byte_offset,
-            is_tool_result = node.is_tool_result,
+            can_dangle = node.can_dangle,
             in_initial_active_offsets = self.initial_active_offsets.contains(&node.byte_offset),
             initial_offset = ?self.initial_offset,
             active_tail = ?self.active_tail,
@@ -191,7 +198,7 @@ impl MessagePath {
 
     pub fn reset(&mut self) {
         self.active_path.clear();
-        self.active_tool_results.clear();
+        self.dangling_nodes.clear();
         self.active_tail = None;
     }
 
@@ -206,7 +213,7 @@ impl MessagePath {
                 return;
             }
             self.active_path.insert(cur.to_string());
-            match self.active_tool_results.get(cur) {
+            match self.dangling_nodes.get(cur) {
                 Some(parent) => cur = parent.as_str(),
                 None => return,
             }
@@ -219,7 +226,7 @@ impl MessagePath {
             if self.active_path.contains(cur) {
                 return true;
             }
-            match self.active_tool_results.get(cur) {
+            match self.dangling_nodes.get(cur) {
                 Some(parent) => cur = parent.as_str(),
                 None => return false,
             }
@@ -234,7 +241,7 @@ impl MessagePath {
             {
                 return true;
             }
-            match self.active_tool_results.get(cur) {
+            match self.dangling_nodes.get(cur) {
                 Some(parent) => cur = parent.as_str(),
                 None => return false,
             }
@@ -249,13 +256,13 @@ mod tests {
     fn n<'a>(
         uuid: &'a str,
         parent: Option<&'a str>,
-        is_tool_result: bool,
+        can_dangle: bool,
         byte_offset: usize,
     ) -> MessageNode<'a> {
         MessageNode {
             uuid,
             parent_uuid: parent,
-            is_tool_result,
+            can_dangle,
             byte_offset,
         }
     }
@@ -422,12 +429,12 @@ mod tests {
         );
 
         assert!(
-            path.active_tool_results.contains_key("result-1"),
-            "result-1 tracked in active_tool_results"
+            path.dangling_nodes.contains_key("result-1"),
+            "result-1 tracked in dangling_nodes"
         );
         assert!(
-            path.active_tool_results.contains_key("result-2"),
-            "result-2 tracked in active_tool_results"
+            path.dangling_nodes.contains_key("result-2"),
+            "result-2 tracked in dangling_nodes"
         );
     }
 
@@ -469,7 +476,7 @@ mod tests {
         );
 
         // Live: asst-final arrives (parent=result-2, non-tool-result).
-        // can_reach_tail(result-2): result-2 → asst-b (via active_tool_results) == active_tail → true.
+        // can_reach_tail(result-2): result-2 → asst-b (via dangling_nodes) == active_tail → true.
         let r = path.forward(&n("asst-final", Some("result-2"), false, 5));
         assert!(
             matches!(r, ForwardPathResult::Ingest),

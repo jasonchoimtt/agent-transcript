@@ -559,14 +559,15 @@ fn value_to_message_node(obj: &serde_json::Value, byte_offset: usize) -> Option<
         parent_uuid = obj["logicalParentUuid"].as_str();
     }
 
-    let is_tool_result = obj["message"]["content"]
-        .as_array()
-        .is_some_and(|a| a.iter().any(|b| b["type"].as_str() == Some("tool_result")));
+    let can_dangle = obj["message"]["content"].as_array().is_some_and(|a| {
+        a.iter()
+            .any(|b| matches!(b["type"].as_str(), Some("tool_result") | Some("tool_use")))
+    });
 
     Some(MessageNode {
         uuid,
         parent_uuid,
-        is_tool_result,
+        can_dangle,
         byte_offset,
     })
 }
@@ -2271,6 +2272,14 @@ mod tests {
                     {"type": "tool_use", "id": "tu-1", "name": "Agent",
                      "input": {"description": "TaskA", "prompt": "..."}}
                 ]}
+            }),
+        );
+        append_json(
+            &jsonl,
+            serde_json::json!({
+                "type": "assistant", "uuid": "asst-msg", "parentUuid": "root",
+                "message": {"id": "msg-2", "role": "assistant",
+                            "content": [{"type": "text", "text": "some message"}]}
             }),
         );
 
