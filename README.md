@@ -6,10 +6,11 @@ agt is a transcript TUI and agent CLI combined into one.
 
 **Features**:
 
-- View agent transcripts in a TUI view with vim-style navigation
+- View agent transcripts in a TUI view with vim-style navigation, incremental search, marks, and jump list
 - Start or resume your session within agt, with intelligent terminal cropping to provide a seamless experience
 - Use your favourite harness -- supports Claude Code and Cursor Agent -- always compatible with latest releases
 - Drill down into nested tool calls and sub-agent sessions
+- Find your way around the transcript using turn-based key navigation or mouse navigtaion
 - Customize tool call formatting and colour palette to your preferences
 - Enjoy a smooth and speedy experience regardless of session length
 
@@ -27,7 +28,11 @@ agt aims to change that, by providing a lightweight and well-designed TUI wrappe
 
 ## Installation
 
-### Using Cargo
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jasonchoimtt/agent-transcript/releases/latest/download/agent-transcript-installer.sh | sh
+```
+
+### Build from source
 
 ```bash
 cargo install agent-transcript
@@ -56,9 +61,10 @@ agt
 Select a transcript by pressing Enter. When in a transcript:
 
 1. Press Ctrl-Y to resume session.
-2. When the chat is in focus, press Ctrl-O to return to normal mode. When in normal mode, press Esc or Ctrl-O to return to chat.
-3. Press Ctrl-X to open the transcript picker again.
-4. To exit the app, exit the agent CLI first (e.g. by pressing Ctrl-D twice), then press q.
+2. When the chat is in focus, press Ctrl-O to return to normal mode. When in normal mode, press Esc to return to chat.
+3. Press Shift-P to toggle a pinned prompt box overlay at the bottom of the transcript view. When scrolled above the terminal, a floating overlay also appears when you press Ctrl-O.
+4. Press Ctrl-X to open the transcript picker again.
+5. To exit the app, exit the agent CLI first (e.g. by pressing Ctrl-D twice), then press q.
 
 You can also open agt to a session directly:
 
@@ -77,13 +83,39 @@ agt cursor
 
 ### Exploring a transcript
 
+**Navigation**:
+
 1. Press `h / j / k / l` or arrow keys to navigate between messages.
-2. Press `[[` and `]]` to navigate by turn.
-3. Press `Ctrl-N` / `Ctrl-P` to scroll by line, and `Ctrl-D` / `Ctrl-U` to scroll by half page.
-4. Press `Space` to drill down: it cycles between collapsed, show more and expand children.
-5. On a table, press `Enter` to navigate between cells. Resize column by `- / =`.
-6. Press `r` to view raw message in a JSON viewer.
-7. Press `?` to view all key shortcuts.
+2. Press `[[` / `]]` to jump to the previous / next turn start; `[]` / `][` for turn end.
+3. Press `) / (` to jump to the next / prev message group; `} / {` for next / prev user or agent message.
+4. Press `g` / `G` to jump to the first / last item. Press `H` / `M` / `L` to select the top / middle / bottom of the viewport.
+5. Press `zt` / `zz` / `zb` to scroll the selection to the top / middle / bottom of the viewport.
+6. Press `Ctrl-N` / `Ctrl-P` to scroll by line, and `Ctrl-D` / `Ctrl-U` to scroll by half page.
+
+**Search**:
+
+7. Press `/` to search forward, `?` to search backward. Type a query and press Enter to commit. Press `n` / `N` to navigate to the next / previous match.
+
+**Drill-down**:
+
+8. Press `Space` to drill down: it cycles between collapsed, show more and expand children.
+9. Press `o` / `c` to expand / collapse the selected node. Press `O` / `C` to expand+reveal or collapse+hide hidden children.
+10. On a table, press `Enter` to navigate between cells. Resize column with `+ / -`; press `0` to reset layout.
+11. Press `r` to view raw message in a JSON viewer.
+12. Press `J` / `K` to reveal the next / prev 5 hidden nodes; `zJ` / `zK` to reveal an entire hidden run; `zh` to reveal all hidden nodes (again to re-hide).
+
+**Marks and jump list**:
+
+13. Press `m<char>` to set a mark on the current message, `dm<char>` to delete it, and `'<char>` or `` `<char> `` to jump to it.
+14. Press `Ctrl-T` to pop the jump list and return to the previous position.
+
+**Mouse**:
+
+15. Left-click a message to select it; click the indicator area (`+`/`-`) to toggle expand; click a gap row to reveal hidden nodes; click the terminal pane to enter terminal mode.
+
+**Reference**:
+
+16. Press `:` to view all key shortcuts.
 
 ### Clipboard support
 
