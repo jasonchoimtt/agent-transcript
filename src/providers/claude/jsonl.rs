@@ -147,10 +147,14 @@ impl JsonlReader {
         }
     }
 
+    /// Only the literal `parentUuid` counts for reordering purposes. `logicalParentUuid`
+    /// (set on `compact_boundary` entries whose `parentUuid` is `null`) is a display-only
+    /// hint that may reference a uuid absent from this transcript entirely — treating it as
+    /// a real dependency would buffer the entry (and everything chained after it) forever,
+    /// since `on_emit` never fires for a uuid that's never written.
     fn extract_parent_uuid(&self, value: &Value) -> Option<String> {
         value["parentUuid"]
             .as_str()
-            .or_else(|| value["logicalParentUuid"].as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     }
@@ -244,6 +248,34 @@ mod tests {
         // "continuation" must come after "attachment"
         let pos_continuation = uuids.iter().position(|u| u == "continuation").unwrap();
         assert!(pos_attachment < pos_continuation);
+    }
+
+    /// A `compact_boundary`-style entry has `parentUuid: null` and a `logicalParentUuid`
+    /// that references a uuid never written anywhere in the transcript. It — and everything
+    /// chained after it — must still be emitted rather than buffered forever waiting for a
+    /// parent that will never arrive.
+    #[test]
+    fn test_null_parent_with_dangling_logical_parent_uuid_not_stuck() {
+        let lines = vec![
+            make_entry("root", None),
+            format!(
+                r#"{{"uuid":"compact_boundary","parentUuid":null,"logicalParentUuid":"never-written"}}"#
+            ),
+            make_entry("summary", Some("compact_boundary")),
+            make_entry("after1", Some("summary")),
+            make_entry("after2", Some("after1")),
+        ];
+        let (_dir, path) = write_jsonl(&lines);
+        let mut r = JsonlReader::new(&path).unwrap();
+
+        let uuids: Vec<String> = std::iter::from_fn(|| r.try_recv().unwrap())
+            .map(|(_, v)| v["uuid"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            uuids,
+            vec!["root", "compact_boundary", "summary", "after1", "after2"]
+        );
     }
 
     /// Byte offsets returned are the start-of-line positions in the file.
