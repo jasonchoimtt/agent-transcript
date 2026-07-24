@@ -50,10 +50,15 @@ impl App {
                 .terminal
                 .live_ts()
                 .and_then(|ts| ts.collapsed_crop.map(|c| c.height));
+            let collapsed_crop_start_row = self
+                .terminal
+                .live_ts()
+                .and_then(|ts| ts.collapsed_crop.map(|c| c.start_row));
             self.tree_state.sync_terminal_layout(
                 self.terminal.expanded,
                 scrollback,
                 collapsed_crop_h,
+                collapsed_crop_start_row,
                 pty_rows,
             );
 
@@ -102,13 +107,21 @@ impl App {
                 } else {
                     0
                 };
+                // When collapsed, the renderer offsets live rows by the crop's start_row
+                // (see terminal/ui.rs); the cursor row must be translated the same way.
+                let crop_start_row = if self.tree_state.terminal_expanded {
+                    0
+                } else {
+                    term.collapsed_crop.map(|c| c.start_row).unwrap_or(0)
+                };
                 let screen = term.parser.screen();
                 let (crow, ccol) = screen.cursor_position();
                 let in_overlay = self
                     .tree_state
                     .prompt_overlay_render_info
                     .is_some_and(|(_, _, _, pbsr)| crow >= pbsr);
-                let cursor_row = live_start as i32 + crow as i32 - tskip as i32;
+                let cursor_row =
+                    live_start as i32 + crow as i32 - tskip as i32 - crop_start_row as i32;
                 if !in_overlay && cursor_row >= 0 && cursor_row < th as i32 && !screen.hide_cursor()
                 {
                     // PTY content starts at tx+1 (col 0 is the selection gutter).

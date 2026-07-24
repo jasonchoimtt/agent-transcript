@@ -559,6 +559,9 @@ pub struct TreeScrollViewState {
     pub terminal_scrollback_available: u16,
     /// Collapsed-view content height from the most recent crop detection (`None` = full pty_rows).
     pub terminal_collapsed_crop_height: Option<u16>,
+    /// Collapsed-view crop start row from the most recent crop detection (`None` = no crop / row 0).
+    /// Needed to translate mouse events into live PTY rows the same way the renderer does.
+    pub terminal_collapsed_crop_start_row: Option<u16>,
     /// Screen position of the terminal widget from the last render: (x, y, area_height, skip).
     /// Set by TreeScrollView::render; used by app.rs to place the PTY cursor.
     pub terminal_render_info: Option<(u16, u16, u16, u16)>,
@@ -632,6 +635,7 @@ impl TreeScrollViewState {
             terminal_pty_rows: 20,
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
+            terminal_collapsed_crop_start_row: None,
             terminal_render_info: None,
             prompt_overlay_render_info: None,
             render_rects: vec![],
@@ -1102,11 +1106,13 @@ impl TreeScrollViewState {
         expanded: bool,
         scrollback: u16,
         collapsed_crop_height: Option<u16>,
+        collapsed_crop_start_row: Option<u16>,
         pty_rows: u16,
     ) {
         if self.terminal_expanded == expanded
             && self.terminal_scrollback_available == scrollback
             && self.terminal_collapsed_crop_height == collapsed_crop_height
+            && self.terminal_collapsed_crop_start_row == collapsed_crop_start_row
             && self.terminal_pty_rows == pty_rows
         {
             return;
@@ -1114,13 +1120,16 @@ impl TreeScrollViewState {
         self.terminal_expanded = expanded;
         self.terminal_scrollback_available = scrollback;
         self.terminal_collapsed_crop_height = collapsed_crop_height;
+        self.terminal_collapsed_crop_start_row = collapsed_crop_start_row;
         self.terminal_pty_rows = pty_rows;
         self.invalidate_terminal_height();
     }
 
-    /// Update the collapsed crop height immediately (called after recompute_crop in the event loop).
-    /// Only invalidates when the value changes and the terminal is collapsed.
-    pub fn set_terminal_collapsed_crop_height(&mut self, height: Option<u16>) {
+    /// Update the collapsed crop extent immediately (called after recompute_crop in the event loop).
+    /// Only invalidates height when the height changes and the terminal is collapsed; the start
+    /// row is stored unconditionally since it doesn't affect layout, only mouse translation.
+    pub fn set_terminal_collapsed_crop(&mut self, height: Option<u16>, start_row: Option<u16>) {
+        self.terminal_collapsed_crop_start_row = start_row;
         if self.terminal_collapsed_crop_height == height {
             return;
         }
@@ -2431,6 +2440,7 @@ impl TreeScrollViewState {
             terminal_pty_rows: 20,
             terminal_scrollback_available: 0,
             terminal_collapsed_crop_height: None,
+            terminal_collapsed_crop_start_row: None,
             terminal_render_info: None,
             prompt_overlay_render_info: None,
             render_rects: vec![],
@@ -2472,11 +2482,13 @@ impl TreeScrollViewState {
             return None;
         }
 
-        // Convert to a 0-based live PTY row.
+        // Convert to a 0-based live PTY row. When collapsed with an active crop, the
+        // renderer offsets block rows by the crop's start_row (see terminal/ui.rs) —
+        // mirror that here so clicks land on the row actually under the cursor.
         let live_row = if expanded {
             block_row.saturating_sub(sb)
         } else {
-            block_row
+            block_row + self.terminal_collapsed_crop_start_row.unwrap_or(0)
         };
 
         if live_row >= self.terminal_pty_rows {

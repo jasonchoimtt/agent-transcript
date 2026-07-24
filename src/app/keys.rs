@@ -464,9 +464,15 @@ impl App {
                 self.terminal.expanded = !self.terminal.expanded;
                 let sb = self.tree_state.terminal_scrollback_available;
                 let crop_h = self.tree_state.terminal_collapsed_crop_height;
+                let crop_start_row = self.tree_state.terminal_collapsed_crop_start_row;
                 let pty_rows = self.tree_state.terminal_pty_rows;
-                self.tree_state
-                    .sync_terminal_layout(self.terminal.expanded, sb, crop_h, pty_rows);
+                self.tree_state.sync_terminal_layout(
+                    self.terminal.expanded,
+                    sb,
+                    crop_h,
+                    crop_start_row,
+                    pty_rows,
+                );
             }
             // Interactive component (e.g. table): Enter enters message interaction mode.
             TreeAction::ToggleExpand if self.tree_state.is_interaction_supported() => {
