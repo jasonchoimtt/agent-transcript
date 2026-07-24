@@ -394,11 +394,9 @@ impl App {
         term.handle_osc_events(osc_events, self.host_bg, active);
         // Recompute collapsed crop and sync height to tree layout.
         term.recompute_crop();
-        let crop_h = self
-            .terminal
-            .live_ts()
-            .and_then(|ts| ts.collapsed_crop.map(|c| c.height));
-        self.tree_state.set_terminal_collapsed_crop_height(crop_h);
+        let crop = self.terminal.live_ts().and_then(|ts| ts.collapsed_crop);
+        self.tree_state
+            .set_terminal_collapsed_crop(crop.map(|c| c.height), crop.map(|c| c.start_row));
         if was_at_bottom {
             self.tree_state.snap_to_bottom(true);
         }
