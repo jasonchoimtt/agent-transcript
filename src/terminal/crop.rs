@@ -80,7 +80,7 @@ impl CropDetector for ClaudeCropDetector {
 
         let bottom_divider = tokenizer.take_until(LineMatcher::Divider)?;
 
-        let top_divider = tokenizer.take_until(LineMatcher::Divider);
+        let top_divider = tokenizer.take_until(LineMatcher::TitledDivider);
 
         match top_divider {
             // Prompt box found between two dividers.
@@ -339,6 +339,58 @@ mod tests {
         assert_eq!(
             crop.prompt_start_row, 4,
             "prompt starts at top divider, not paragraph"
+        );
+    }
+
+    // ── Claude titled top divider ────────────────────────────────────────────
+
+    #[test]
+    fn claude_titled_top_divider_leading_form_detected() {
+        // Top divider is "─── History 100/100 ───…" — should still be recognized as the
+        // top border of the prompt box.
+        let mut p = make_screen(20, 80);
+        let title = " History 100/100 ";
+        let top_div: String = "───".to_string() + title + &"─".repeat(80 - 3 - title.len());
+        let bot_div: String = "─".repeat(80);
+        p.process(format!("\x1b[5;1H{top_div}").as_bytes()); // top divider at row 4
+        p.process(format!("\x1b[15;1H{bot_div}").as_bytes()); // bottom divider at row 14
+        let s = p.screen().clone();
+        let crop = ClaudeCropDetector
+            .detect(&s)
+            .expect("titled top divider should still be recognized");
+        assert_eq!(crop.prompt_start_row, 4);
+    }
+
+    #[test]
+    fn claude_titled_top_divider_trailing_form_detected() {
+        // Top divider is "────…── some title ──" — should still be recognized.
+        let mut p = make_screen(20, 80);
+        let title = " some title ";
+        let top_div: String = "─".repeat(80 - 2 - title.len()) + title + "──";
+        let bot_div: String = "─".repeat(80);
+        p.process(format!("\x1b[5;1H{top_div}").as_bytes()); // top divider at row 4
+        p.process(format!("\x1b[15;1H{bot_div}").as_bytes()); // bottom divider at row 14
+        let s = p.screen().clone();
+        let crop = ClaudeCropDetector
+            .detect(&s)
+            .expect("titled top divider should still be recognized");
+        assert_eq!(crop.prompt_start_row, 4);
+    }
+
+    #[test]
+    fn claude_titled_bottom_divider_not_allowed() {
+        // A titled row at the *bottom* divider position must not be treated as a divider —
+        // titled forms are only valid for the upper border. No plain divider exists, so
+        // no two-divider box can be found; falls back to no crop.
+        let mut p = make_screen(20, 80);
+        let title = " History 100/100 ";
+        let bot_div: String = "───".to_string() + title + &"─".repeat(80 - 3 - title.len());
+        p.process(b"\x1b[1;1Hsome assistant text");
+        p.process(format!("\x1b[15;1H{bot_div}").as_bytes()); // titled row at row 14
+        let s = p.screen().clone();
+        assert!(
+            ClaudeCropDetector.detect(&s).is_none(),
+            "titled row must not be accepted as the bottom (lower) divider"
         );
     }
 
