@@ -13,6 +13,10 @@ pub enum LineMatcher {
     /// Non-blank text OR any cell with a non-Default background color.
     Visible,
     Divider,
+    /// A plain `Divider` row, OR a divider row with an embedded title flanked by
+    /// spaces (e.g. `─── History 100/100 ───…` or `───…── some title ──`).
+    /// Only intended for the *upper* prompt-box border.
+    TitledDivider,
     Backgrounded,
     Braille,
 }
@@ -208,6 +212,9 @@ impl<'a> LineTokenizer<'a> {
             LineMatcher::NonBlank => !self.is_blank_row(row),
             LineMatcher::Visible => !self.is_blank_row(row) || self.has_background_cell(row),
             LineMatcher::Divider => self.is_divider_row(row),
+            LineMatcher::TitledDivider => {
+                self.is_divider_row(row) || self.is_titled_divider_row(row)
+            }
             LineMatcher::Backgrounded => self.is_backgrounded_row(row),
             LineMatcher::Braille => self.is_braille_row(row),
         }
@@ -262,6 +269,81 @@ impl<'a> LineTokenizer<'a> {
             }
         }
         divider_count as f32 >= threshold
+    }
+
+    fn cell_contents(&self, row: u16, col: u16) -> String {
+        self.screen
+            .cell(row, col)
+            .map(|cell| cell.contents().to_string())
+            .unwrap_or_default()
+    }
+
+    /// True when `row` is a divider with an embedded title flanked by spaces, in one of
+    /// two exact forms:
+    /// - exactly 3 leading `─`, a space, the title, a space, then dividers to the end
+    /// - dividers from the start, a space, the title, a space, then exactly 2 trailing `─`
+    fn is_titled_divider_row(&self, row: u16) -> bool {
+        self.has_leading_titled_divider(row) || self.has_trailing_titled_divider(row)
+    }
+
+    /// `─── <title> ─────`
+    fn has_leading_titled_divider(&self, row: u16) -> bool {
+        if self.cols < 6 {
+            return false;
+        }
+        if (0..3).any(|col| self.cell_contents(row, col) != "─") {
+            return false;
+        }
+        if self.cell_contents(row, 3) != " " {
+            return false;
+        }
+        // Trailing run of dividers back from the end of the row.
+        let mut trailing_start = self.cols;
+        while trailing_start > 4 && self.cell_contents(row, trailing_start - 1) == "─" {
+            trailing_start -= 1;
+        }
+        if trailing_start == self.cols || trailing_start <= 4 {
+            return false; // no trailing dividers, or no room left for a title
+        }
+        if self.cell_contents(row, trailing_start - 1) != " " {
+            return false;
+        }
+        // Title text must be non-blank.
+        (4..trailing_start - 1).any(|col| {
+            let c = self.cell_contents(row, col);
+            !c.is_empty() && c != " "
+        })
+    }
+
+    /// `───── <title> ──`
+    fn has_trailing_titled_divider(&self, row: u16) -> bool {
+        if self.cols < 6 {
+            return false;
+        }
+        if self.cell_contents(row, self.cols - 1) != "─"
+            || self.cell_contents(row, self.cols - 2) != "─"
+        {
+            return false;
+        }
+        if self.cell_contents(row, self.cols - 3) != " " {
+            return false;
+        }
+        // Leading run of dividers from the start of the row.
+        let mut leading_end = 0u16;
+        while leading_end < self.cols - 3 && self.cell_contents(row, leading_end) == "─" {
+            leading_end += 1;
+        }
+        if leading_end == 0 {
+            return false; // no leading dividers
+        }
+        if self.cell_contents(row, leading_end) != " " {
+            return false;
+        }
+        // Title text must be non-blank.
+        (leading_end + 1..self.cols - 3).any(|col| {
+            let c = self.cell_contents(row, col);
+            !c.is_empty() && c != " "
+        })
     }
 
     /// True when ≥ 80% of the row's cells have a non-Default background color.
@@ -462,6 +544,74 @@ mod tests {
         );
         tok.seek(2);
         assert!(!tok.is(LineMatcher::Braille), "blank row should not match");
+    }
+
+    // ── TitledDivider ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn titled_divider_leading_form_matched() {
+        // "─── History 100/100 ────…" — exactly 3 leading dividers, flanked title.
+        let mut p = make_screen(5, 80);
+        let title = " History 100/100 ";
+        let row: String = "───".to_string() + title + &"─".repeat(80 - 3 - title.len());
+        p.process(format!("\x1b[1;1H{row}").as_bytes());
+        let mut tok = LineTokenizer::new(p.screen());
+        tok.seek(0);
+        assert!(tok.is(LineMatcher::TitledDivider));
+        assert!(
+            !tok.is(LineMatcher::Divider),
+            "plain Divider must not match a titled row"
+        );
+    }
+
+    #[test]
+    fn titled_divider_trailing_form_matched() {
+        // "────…── some title ──" — exactly 2 trailing dividers, flanked title.
+        let mut p = make_screen(5, 80);
+        let title = " some title ";
+        let row: String = "─".repeat(80 - 2 - title.len()) + title + "──";
+        p.process(format!("\x1b[1;1H{row}").as_bytes());
+        let mut tok = LineTokenizer::new(p.screen());
+        tok.seek(0);
+        assert!(tok.is(LineMatcher::TitledDivider));
+        assert!(
+            !tok.is(LineMatcher::Divider),
+            "plain Divider must not match a titled row"
+        );
+    }
+
+    #[test]
+    fn titled_divider_plain_divider_still_matches() {
+        let mut p = make_screen(5, 80);
+        let divider: String = "─".repeat(80);
+        p.process(format!("\x1b[1;1H{divider}").as_bytes());
+        let mut tok = LineTokenizer::new(p.screen());
+        tok.seek(0);
+        assert!(tok.is(LineMatcher::TitledDivider));
+    }
+
+    #[test]
+    fn titled_divider_wrong_leading_count_rejected() {
+        // 4 leading dividers (not exactly 3) before the title → not matched.
+        let mut p = make_screen(5, 80);
+        let title = " History 100/100 ";
+        let row: String = "────".to_string() + title + &"─".repeat(80 - 4 - title.len());
+        p.process(format!("\x1b[1;1H{row}").as_bytes());
+        let mut tok = LineTokenizer::new(p.screen());
+        tok.seek(0);
+        assert!(!tok.is(LineMatcher::TitledDivider));
+    }
+
+    #[test]
+    fn titled_divider_wrong_trailing_count_rejected() {
+        // 3 trailing dividers (not exactly 2) after the title → not matched.
+        let mut p = make_screen(5, 80);
+        let title = " some title ";
+        let row: String = "─".repeat(80 - 3 - title.len()) + title + "───";
+        p.process(format!("\x1b[1;1H{row}").as_bytes());
+        let mut tok = LineTokenizer::new(p.screen());
+        tok.seek(0);
+        assert!(!tok.is(LineMatcher::TitledDivider));
     }
 
     #[test]
