@@ -112,7 +112,7 @@ pub struct TaggedContainerStyle {
 #[serde(default)]
 pub struct ContainerStyle {
     pub default: TaggedContainerStyle,
-    /// Keyed by structural tag (e.g. `"turn"`, `"user-turn"`, `"agent-turn"`, `"task"`).
+    /// Keyed by structural tag (e.g. `"task"`, `"summary"`, `"attachment"`).
     pub tag_styles: HashMap<String, TaggedContainerStyle>,
 }
 

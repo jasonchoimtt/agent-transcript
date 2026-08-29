@@ -24,7 +24,7 @@ struct SubagentWatcher {
     placeholder_emitted: bool,
     /// How many bytes of the sub-agent JSONL have already been parsed.
     byte_offset: usize,
-    /// Parsing state for this sub-agent (id_prefix + suppress_containers set).
+    /// Parsing state for this sub-agent; `id_prefix` namespaces its node IDs.
     parse_state: ParseState,
 }
 
@@ -163,7 +163,6 @@ impl ClaudeSubagentManager {
                     byte_offset: 0,
                     parse_state: ParseState {
                         id_prefix: format!("sa:{}:", agent_id),
-                        suppress_containers: true,
                         ..Default::default()
                     },
                 },

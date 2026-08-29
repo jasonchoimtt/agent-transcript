@@ -180,7 +180,7 @@ impl CursorReader {
         // Recover pre-summary history via field-13 back-references.
         // Each entry is a pre-summary snapshot whose messages were dropped when Cursor
         // summarized the context. We process them first (oldest to newest) so recovered
-        // turns receive correct turn numbers that precede the current root's turns.
+        // messages are appended ahead of the current root's messages.
         // seen_blobs dedup suppresses any overlap; last_field1_hashes is unaffected.
         match self.db.fetch_pre_summary_snapshots(&root_data) {
             Ok(snapshots) => {

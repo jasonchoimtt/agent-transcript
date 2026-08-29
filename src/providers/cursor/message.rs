@@ -6,16 +6,10 @@ use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
 pub struct ParseState {
-    pub turn_n: usize,
-    pub current_turn_has_agent_event: bool,
     /// Full 32-byte SHA256 IDs of blobs already processed.
     pub seen_blobs: HashSet<[u8; 32]>,
-    /// IDs of container nodes (turn/user_turn/agent_turn) already appended.
-    pub containers_emitted: HashSet<String>,
     /// toolCallId → the assistant tool-call block JSON (for generating call+result text).
     pub pending_tool_calls: HashMap<String, serde_json::Value>,
-    /// ID of the current turn group node, for use as parent by agent_turn.
-    pub current_turn_id: String,
     /// True after the first streaming:pending node has been emitted; switches Append → Replace.
     pub has_pending: bool,
 }
@@ -29,12 +23,8 @@ impl Default for ParseState {
 impl ParseState {
     pub fn new() -> Self {
         Self {
-            turn_n: 0,
-            current_turn_has_agent_event: false,
             seen_blobs: HashSet::new(),
-            containers_emitted: HashSet::new(),
             pending_tool_calls: HashMap::new(),
-            current_turn_id: String::new(),
             has_pending: false,
         }
     }
@@ -87,53 +77,6 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 .as_bool()
                 .unwrap_or(false);
 
-            // Open a new turn if needed.
-            if state.current_turn_has_agent_event {
-                state.turn_n += 1;
-                state.current_turn_has_agent_event = false;
-            }
-
-            let turn_group_id = format!("turn:{}", state.turn_n);
-            let user_turn_id = format!("user_turn:{}", state.turn_n);
-
-            // Emit the turn group container first (once per turn).
-            if !state.containers_emitted.contains(&turn_group_id) {
-                state.containers_emitted.insert(turn_group_id.clone());
-                state.current_turn_id = turn_group_id.clone();
-                let brief = if is_injected {
-                    format!("Turn {}", state.turn_n)
-                } else {
-                    let first_line = text.lines().next().unwrap_or("").trim();
-                    if first_line.is_empty() {
-                        format!("Turn {}", state.turn_n)
-                    } else {
-                        first_line.to_string()
-                    }
-                };
-                ops.push(TreeOperation::Append {
-                    parent_id: None,
-                    message: MessageState::new(turn_group_id.clone())
-                        .brief(brief)
-                        .group(true)
-                        .message_type(MessageType::Container)
-                        .tag("turn")
-                        .indent_children(false),
-                });
-            }
-
-            if !state.containers_emitted.contains(&user_turn_id) {
-                state.containers_emitted.insert(user_turn_id.clone());
-                ops.push(TreeOperation::Append {
-                    parent_id: Some(turn_group_id),
-                    message: MessageState::new(user_turn_id.clone())
-                        .text("User")
-                        .data(serde_json::json!({ "type": &user_turn_id }).to_string())
-                        .message_type(MessageType::Container)
-                        .tag("user-turn")
-                        .indent_children(false),
-                });
-            }
-
             let mut user_msg = MessageState::new(format!("user_msg:{}", blob_hex))
                 .text(text)
                 .data(obj.to_string())
@@ -150,33 +93,12 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 user_msg = user_msg.timestamp(ts);
             }
             ops.push(TreeOperation::Append {
-                parent_id: Some(user_turn_id),
+                parent_id: None,
                 message: user_msg,
             });
         }
 
         "assistant" => {
-            let agent_turn_id = format!("agent_turn:{}", state.turn_n);
-
-            if !state.containers_emitted.contains(&agent_turn_id) {
-                state.containers_emitted.insert(agent_turn_id.clone());
-                // Parent under the current turn group if one exists, else root.
-                let parent = if state.current_turn_id.is_empty() {
-                    None
-                } else {
-                    Some(state.current_turn_id.clone())
-                };
-                ops.push(TreeOperation::Append {
-                    parent_id: parent,
-                    message: MessageState::new(agent_turn_id.clone())
-                        .text("Agent")
-                        .data(serde_json::json!({ "type": &agent_turn_id }).to_string())
-                        .message_type(MessageType::Container)
-                        .tag("agent-turn")
-                        .indent_children(false),
-                });
-            }
-
             let content_arr = obj["content"].as_array().cloned().unwrap_or_default();
 
             for (idx, block) in content_arr.iter().enumerate() {
@@ -185,17 +107,16 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                     "reasoning" => {
                         let text = block["text"].as_str().unwrap_or("").to_string();
                         ops.push(TreeOperation::Append {
-                            parent_id: Some(agent_turn_id.clone()),
+                            parent_id: None,
                             message: MessageState::new(format!("thinking:{}:{}", blob_hex, idx))
                                 .text(text)
                                 .data(block.to_string())
                                 .message_type(MessageType::Thinking),
                         });
-                        state.current_turn_has_agent_event = true;
                     }
                     "redacted-reasoning" => {
                         ops.push(TreeOperation::Append {
-                            parent_id: Some(agent_turn_id.clone()),
+                            parent_id: None,
                             message: MessageState::new(format!(
                                 "redacted_thinking:{}:{}",
                                 blob_hex, idx
@@ -205,18 +126,16 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                             .message_type(MessageType::Thinking)
                             .tag("redacted"),
                         });
-                        state.current_turn_has_agent_event = true;
                     }
                     "text" => {
                         let text = block["text"].as_str().unwrap_or("").to_string();
                         ops.push(TreeOperation::Append {
-                            parent_id: Some(agent_turn_id.clone()),
+                            parent_id: None,
                             message: MessageState::new(format!("text:{}:{}", blob_hex, idx))
                                 .text(text)
                                 .data(block.to_string())
                                 .message_type(MessageType::AgentMessage),
                         });
-                        state.current_turn_has_agent_event = true;
                     }
                     "tool-call" => {
                         let tool_name = block["toolName"].as_str().unwrap_or("?");
@@ -232,13 +151,12 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                             msg = msg.props(p);
                         }
                         ops.push(TreeOperation::Append {
-                            parent_id: Some(agent_turn_id.clone()),
+                            parent_id: None,
                             message: msg,
                         });
                         state
                             .pending_tool_calls
                             .insert(tool_call_id.to_string(), block.clone());
-                        state.current_turn_has_agent_event = true;
                     }
                     _ => {}
                 }
@@ -395,26 +313,7 @@ pub fn parse_pending_blob(data: &[u8], state: &mut ParseState) -> Vec<TreeOperat
         return vec![];
     }
 
-    // Ensure the agent_turn container exists before appending under it.
-    let agent_turn_id = format!("agent_turn:{}", state.turn_n);
     let mut ops = Vec::new();
-    if !state.containers_emitted.contains(&agent_turn_id) {
-        state.containers_emitted.insert(agent_turn_id.clone());
-        let parent = if state.current_turn_id.is_empty() {
-            None
-        } else {
-            Some(state.current_turn_id.clone())
-        };
-        ops.push(TreeOperation::Append {
-            parent_id: parent,
-            message: MessageState::new(agent_turn_id.clone())
-                .text("Agent")
-                .data(serde_json::json!({ "type": &agent_turn_id }).to_string())
-                .message_type(MessageType::Container)
-                .tag("agent-turn")
-                .indent_children(false),
-        });
-    }
 
     // Extract text from type:"text" blocks only. redacted-reasoning and tool-call
     // blocks in field 4 have no displayable text and are silently skipped.
@@ -445,7 +344,7 @@ pub fn parse_pending_blob(data: &[u8], state: &mut ParseState) -> Vec<TreeOperat
     } else {
         state.has_pending = true;
         ops.push(TreeOperation::Append {
-            parent_id: Some(agent_turn_id),
+            parent_id: None,
             message: pending_node,
         });
     }
@@ -648,6 +547,29 @@ mod tests {
         "a".repeat(64)
     }
 
+    fn append_ids(ops: &[TreeOperation]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                TreeOperation::Append { message, .. } => Some(message.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn all_appends_at_root(ops: &[TreeOperation]) -> bool {
+        ops.iter().all(|op| match op {
+            TreeOperation::Append { parent_id, .. } => parent_id.is_none(),
+            _ => true,
+        })
+    }
+
+    fn has_container(ops: &[TreeOperation]) -> bool {
+        ops.iter().any(|op| match op {
+            TreeOperation::Append { message, .. } => message.message_type == MessageType::Container,
+            _ => false,
+        })
+    }
+
     #[test]
     fn test_parse_system_blob_emits_system_node() {
         let blob = serde_json::json!({ "role": "system", "content": "You are an AI." });
@@ -725,38 +647,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_user_blob_opens_turn() {
+    fn test_parse_user_blob_appends_at_root() {
         let blob = serde_json::json!({
             "role": "user",
             "content": [{"type": "text", "text": "Hello world"}]
         });
         let mut state = ParseState::new();
         let ops = parse_blob(&fake_blob_id(), blob.to_string().as_bytes(), &mut state);
-        // Should emit: turn:0 group (top-level), user_turn:0 child, user_msg leaf.
-        let ids: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TreeOperation::Append { message, .. } => Some(message.id.clone()),
-                TreeOperation::Replace { message, .. } => Some(message.id.clone()),
-                TreeOperation::Update { message, .. } => Some(message.id.clone()),
-                TreeOperation::Remove { .. } => None,
-            })
-            .collect();
-        assert!(
-            ids.contains(&"turn:0".to_string()),
-            "turn:n group wrapper should be present"
-        );
-        assert!(ids.contains(&"user_turn:0".to_string()));
-        assert!(ids.iter().any(|id| id.starts_with("user_msg:")));
-        // turn:0 should be a group node
-        let turn_op = ops.iter().find(|op| match op {
-            TreeOperation::Append { message, .. } => message.id == "turn:0",
-            _ => false,
-        });
-        if let Some(TreeOperation::Append { message, parent_id }) = turn_op {
-            assert!(message.group, "turn:0 should be a group node");
-            assert!(parent_id.is_none(), "turn:0 should be a root node");
-        }
+
+        assert!(append_ids(&ops).iter().any(|id| id.starts_with("user_msg:")));
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops), "no turn containers should be emitted");
     }
 
     #[test]
@@ -767,20 +668,11 @@ mod tests {
             "content": [{"type": "text", "text": "Hi there"}]
         });
         let mut state = ParseState::new();
-        // Seed agent_turn container so we only get the text node in ops.
-        state.containers_emitted.insert("agent_turn:0".to_string());
         let ops = parse_blob(&id, blob.to_string().as_bytes(), &mut state);
-        let ids: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TreeOperation::Append { message, .. } => Some(message.id.clone()),
-                TreeOperation::Replace { message, .. } => Some(message.id.clone()),
-                TreeOperation::Update { message, .. } => Some(message.id.clone()),
-                TreeOperation::Remove { .. } => None,
-            })
-            .collect();
-        assert!(ids.iter().any(|id| id.starts_with("text:")));
-        assert!(state.current_turn_has_agent_event);
+
+        assert!(append_ids(&ops).iter().any(|id| id.starts_with("text:")));
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
     }
 
     #[test]
@@ -846,37 +738,71 @@ mod tests {
     }
 
     #[test]
-    fn test_new_turn_on_agent_event_then_user() {
+    fn test_consecutive_user_blobs_both_append_at_root() {
         let mut state = ParseState::new();
 
-        // First user message: opens user_turn:0
         let u1 = serde_json::json!({"role": "user", "content": "hello"});
         let u1_id = "a".repeat(64);
-        parse_blob(&u1_id, u1.to_string().as_bytes(), &mut state);
-        assert_eq!(state.turn_n, 0);
-
-        // Agent responds: sets current_turn_has_agent_event
-        state.current_turn_has_agent_event = true;
-
-        // Second user message: should open user_turn:1
         let u2 = serde_json::json!({"role": "user", "content": "follow-up"});
         let u2_id = "b".repeat(64);
-        let ops = parse_blob(&u2_id, u2.to_string().as_bytes(), &mut state);
-        assert_eq!(state.turn_n, 1);
-        let ids: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TreeOperation::Append { message, .. } => Some(message.id.clone()),
-                TreeOperation::Replace { message, .. } => Some(message.id.clone()),
-                TreeOperation::Update { message, .. } => Some(message.id.clone()),
-                TreeOperation::Remove { .. } => None,
-            })
-            .collect();
-        assert!(
-            ids.contains(&"turn:1".to_string()),
-            "turn:n group wrapper should be present"
-        );
-        assert!(ids.contains(&"user_turn:1".to_string()));
+
+        let mut ops = parse_blob(&u1_id, u1.to_string().as_bytes(), &mut state);
+        ops.extend(parse_blob(&u2_id, u2.to_string().as_bytes(), &mut state));
+
+        let ids = append_ids(&ops);
+        assert_eq!(ids.len(), 2, "back-to-back user messages must not be wrapped");
+        assert!(ids[0].starts_with("user_msg:a"));
+        assert!(ids[1].starts_with("user_msg:b"));
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
+    }
+
+    /// A scripted round-trip: everything lands at root level, except tool results,
+    /// which nest under the tool call they answer.
+    #[test]
+    fn test_round_trip_emits_flat_tree() {
+        let mut state = ParseState::new();
+        let blobs = [
+            (
+                "a".repeat(64),
+                serde_json::json!({"role": "user", "content": "please read the file"}),
+            ),
+            (
+                "b".repeat(64),
+                serde_json::json!({"role": "assistant", "content": [
+                    {"type": "text", "text": "sure"},
+                    {"type": "tool-call", "toolName": "Read", "toolCallId": "tc1", "args": {}}
+                ]}),
+            ),
+            (
+                "c".repeat(64),
+                serde_json::json!({"role": "tool", "content": [
+                    {"type": "tool-result", "toolName": "Read", "toolCallId": "tc1", "result": "contents"}
+                ]}),
+            ),
+            (
+                "d".repeat(64),
+                serde_json::json!({"role": "user", "content": "thanks"}),
+            ),
+        ];
+
+        let mut ops = Vec::new();
+        for (id, blob) in &blobs {
+            ops.extend(parse_blob(id, blob.to_string().as_bytes(), &mut state));
+        }
+
+        assert!(!has_container(&ops), "no turn containers should be emitted");
+        for op in &ops {
+            if let TreeOperation::Append { parent_id, message } = op {
+                match parent_id.as_deref() {
+                    None => {}
+                    Some("tool_call:tc1") => {
+                        assert_eq!(message.message_type, MessageType::ToolResult)
+                    }
+                    Some(other) => panic!("unexpected parent {other} for {}", message.id),
+                }
+            }
+        }
     }
 
     #[test]
@@ -912,7 +838,6 @@ mod tests {
         });
         let mut state = ParseState::new();
         state.has_pending = true;
-        state.containers_emitted.insert("agent_turn:0".to_string());
         let ops = parse_pending_blob(blob.to_string().as_bytes(), &mut state);
         let replace_op = ops.iter().find(|op| {
             matches!(
@@ -936,7 +861,6 @@ mod tests {
             ]
         });
         let mut state = ParseState::new();
-        state.containers_emitted.insert("agent_turn:0".to_string());
         let ops = parse_pending_blob(blob.to_string().as_bytes(), &mut state);
         let append_op = ops.iter().find(|op| match op {
             TreeOperation::Append { message, .. } => message.id == "streaming:pending",
@@ -958,7 +882,6 @@ mod tests {
             "content": [{"type": "redacted-reasoning", "data": "opaque"}]
         });
         let mut state = ParseState::new();
-        state.containers_emitted.insert("agent_turn:0".to_string());
         let ops = parse_pending_blob(blob.to_string().as_bytes(), &mut state);
         assert!(
             !state.has_pending,
@@ -978,7 +901,6 @@ mod tests {
         });
         let mut state = ParseState::new();
         state.has_pending = true;
-        state.containers_emitted.insert("agent_turn:0".to_string());
         let ops = parse_pending_blob(blob.to_string().as_bytes(), &mut state);
         assert!(
             !state.has_pending,

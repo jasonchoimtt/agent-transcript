@@ -44,8 +44,6 @@ stdout                = {}
 default = { content = { fg = "muted" } }
 
 [container.tag_styles]
-agent-turn = { content = { fg = "muted", underlined = true } }
-user-turn  = { content = { fg = "muted", underlined = true } }
 
 [selection]
 indicator = { fg = "primary" }

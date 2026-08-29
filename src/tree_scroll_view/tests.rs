@@ -1,7 +1,9 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use super::state::{MessageState, MessageType, Precedence, TreeScrollViewState, get_node};
+use super::state::{
+    HiddenState, MessageState, MessageType, Precedence, TreeScrollViewState, get_node,
+};
 use super::ui::TreeScrollView;
 use crate::reader_op::ReaderOp;
 use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
@@ -1046,133 +1048,49 @@ fn reset_snapshot_restores_flags_on_child_nodes() {
 
 // ── advanced navigation fixture ───────────────────────────────────────────────
 //
-// Tree layout (all expanded):
-//   [0] turn:0   Container  group=true
-//     [0,0] user_turn:0  Container
-//       [0,0,0] user:0   UserMessage
-//     [0,1] agent_turn:0 Container
-//       [0,1,0] agent:0a AgentMessage
-//       [0,1,1] agent:0b AgentMessage
-//       [0,1,2] tool:0   ToolCall  (expanded)
-//         [0,1,2,0] result:0 ToolResult
-//   [1] turn:1   Container  group=true
-//     [1,0] user_turn:1  Container
-//       [1,0,0] user:1   UserMessage
-//     [1,1] agent_turn:1 Container
-//       [1,1,0] think:1  Thinking
-//       [1,1,1] agent:1  AgentMessage
-//   [2] turn:2   Container  group=true
-//     [2,0] user_turn:2  Container
-//       [2,0,0] user:2   UserMessage
-//     [2,1] agent_turn:2 Container
-//       [2,1,0] agent:2  AgentMessage
-//   [3] terminal (added by TreeScrollViewState::new)
+// Flat tree (all expanded); every message sits at the top level, which is what the
+// providers emit now that turn containers are gone:
+//   [0] user:0    UserMessage
+//   [1] agent:0a  AgentMessage
+//   [2] agent:0b  AgentMessage
+//   [3] tool:0    ToolCall  (expanded)
+//     [3,0] result:0  ToolResult
+//   [4] user:1    UserMessage
+//   [5] think:1   Thinking
+//   [6] agent:1   AgentMessage
+//   [7] user:2    UserMessage
+//   [8] agent:2   AgentMessage
+//   [9] terminal (added by TreeScrollViewState::new)
+//
+// Actor runs (for `]]` `[[` `][` `[]`):
+//   User [0], Agent [1..=3], User [4], Agent [5..=6], User [7], Agent [8]
 //
 // DFS non-Container order (for `()`):
-//   [0,0,0] UserMessage, [0,1,0] AgentMessage, [0,1,1] AgentMessage,
-//   [0,1,2] ToolCall, [0,1,2,0] ToolResult,
-//   [1,0,0] UserMessage, [1,1,0] Thinking, [1,1,1] AgentMessage,
-//   [2,0,0] UserMessage, [2,1,0] AgentMessage
+//   [0], [1], [2], [3], [3,0], [4], [5], [6], [7], [8]
 //
 // DFS UserMessage/AgentMessage order (for `{}`):
-//   [0,0,0] UserMessage, [0,1,0] AgentMessage, [0,1,1] AgentMessage,
-//   [1,0,0] UserMessage, [1,1,1] AgentMessage,
-//   [2,0,0] UserMessage, [2,1,0] AgentMessage
+//   [0], [1], [2], [4], [6], [7], [8]
 
-fn container(id: &str) -> MessageState {
-    MessageState::new(id).message_type(MessageType::Container)
-}
-
-fn turn_group(id: &str, children: Vec<MessageState>) -> MessageState {
-    container(id).group(true).children(children)
-}
-
-fn sub_turn(id: &str, children: Vec<MessageState>) -> MessageState {
-    container(id).children(children)
+fn node(id: &str, message_type: MessageType, text: &str) -> MessageState {
+    MessageState::new(id).message_type(message_type).text(text)
 }
 
 fn nav_tree() -> TreeScrollViewState {
-    let turn0 = turn_group(
-        "turn:0",
-        vec![
-            sub_turn(
-                "user_turn:0",
-                vec![
-                    MessageState::new("user:0")
-                        .message_type(MessageType::UserMessage)
-                        .text("u0"),
-                ],
-            ),
-            sub_turn(
-                "agent_turn:0",
-                vec![
-                    MessageState::new("agent:0a")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a0a"),
-                    MessageState::new("agent:0b")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a0b"),
-                    MessageState::new("tool:0")
-                        .message_type(MessageType::ToolCall)
-                        .text("bash")
-                        .children(vec![
-                            MessageState::new("result:0")
-                                .message_type(MessageType::ToolResult)
-                                .text("ok"),
-                        ]),
-                ],
-            ),
-        ],
-    );
-
-    let turn1 = turn_group(
-        "turn:1",
-        vec![
-            sub_turn(
-                "user_turn:1",
-                vec![
-                    MessageState::new("user:1")
-                        .message_type(MessageType::UserMessage)
-                        .text("u1"),
-                ],
-            ),
-            sub_turn(
-                "agent_turn:1",
-                vec![
-                    MessageState::new("think:1")
-                        .message_type(MessageType::Thinking)
-                        .text("..."),
-                    MessageState::new("agent:1")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a1"),
-                ],
-            ),
-        ],
-    );
-
-    let turn2 = turn_group(
-        "turn:2",
-        vec![
-            sub_turn(
-                "user_turn:2",
-                vec![
-                    MessageState::new("user:2")
-                        .message_type(MessageType::UserMessage)
-                        .text("u2"),
-                ],
-            ),
-            sub_turn(
-                "agent_turn:2",
-                vec![
-                    MessageState::new("agent:2")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a2"),
-                ],
-            ),
-        ],
-    );
-
-    TreeScrollViewState::new(vec![turn0, turn1, turn2])
+    TreeScrollViewState::new(vec![
+        node("user:0", MessageType::UserMessage, "u0"),
+        node("agent:0a", MessageType::AgentMessage, "a0a"),
+        node("agent:0b", MessageType::AgentMessage, "a0b"),
+        node("tool:0", MessageType::ToolCall, "bash").children(vec![node(
+            "result:0",
+            MessageType::ToolResult,
+            "ok",
+        )]),
+        node("user:1", MessageType::UserMessage, "u1"),
+        node("think:1", MessageType::Thinking, "..."),
+        node("agent:1", MessageType::AgentMessage, "a1"),
+        node("user:2", MessageType::UserMessage, "u2"),
+        node("agent:2", MessageType::AgentMessage, "a2"),
+    ])
 }
 
 fn sel(state: &TreeScrollViewState) -> Vec<usize> {
@@ -1184,67 +1102,55 @@ fn sel(state: &TreeScrollViewState) -> Vec<usize> {
 #[test]
 fn select_next_type_start_advances_across_type_boundary() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // user:0 (UserMessage)
+    state.selection_index = vec![0]; // user:0 (UserMessage)
 
-    state.select_next_type_start(); // → first AgentMessage in turn0
-    assert_eq!(
-        sel(&state),
-        vec![0, 1, 0],
-        "should advance to first AgentMessage run"
-    );
+    state.select_next_type_start(); // → agent:0a
+    assert_eq!(sel(&state), vec![1], "should advance to first AgentMessage run");
 }
 
 #[test]
 fn select_next_type_start_skips_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 0]; // agent:0a (first of AgentMessage run)
+    state.selection_index = vec![1]; // agent:0a (first of AgentMessage run)
 
     state.select_next_type_start(); // → ToolCall (different type after AgentMessage run)
-    assert_eq!(
-        sel(&state),
-        vec![0, 1, 2],
-        "should skip AgentMessage run to ToolCall"
-    );
+    assert_eq!(sel(&state), vec![3], "should skip AgentMessage run to ToolCall");
 }
 
 #[test]
 fn select_next_type_start_clamps_at_last_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![2, 1, 0]; // agent:2 (last non-terminal node)
+    state.selection_index = vec![8]; // agent:2 (last non-terminal node)
 
     state.select_next_type_start(); // nothing after
-    assert_eq!(
-        sel(&state),
-        vec![2, 1, 0],
-        "should stay at last node when no next run"
-    );
+    assert_eq!(sel(&state), vec![8], "should stay at last node when no next run");
 }
 
 #[test]
 fn select_prev_type_start_at_run_start_goes_to_prev_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 0]; // agent:0a — start of AgentMessage run
+    state.selection_index = vec![1]; // agent:0a — start of AgentMessage run
 
     state.select_prev_type_start(); // → user:0 (prev run)
-    assert_eq!(sel(&state), vec![0, 0, 0]);
+    assert_eq!(sel(&state), vec![0]);
 }
 
 #[test]
 fn select_prev_type_start_mid_run_goes_to_run_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 1]; // agent:0b — mid AgentMessage run
+    state.selection_index = vec![2]; // agent:0b — mid AgentMessage run
 
     state.select_prev_type_start(); // → agent:0a (start of current run)
-    assert_eq!(sel(&state), vec![0, 1, 0]);
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
 fn select_prev_type_start_clamps_at_first_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // user:0 — first node
+    state.selection_index = vec![0]; // user:0 — first node
 
     state.select_prev_type_start();
-    assert_eq!(sel(&state), vec![0, 0, 0], "should stay when no prev run");
+    assert_eq!(sel(&state), vec![0], "should stay when no prev run");
 }
 
 // ── {} user/agent navigation ──────────────────────────────────────────────────
@@ -1252,48 +1158,48 @@ fn select_prev_type_start_clamps_at_first_run() {
 #[test]
 fn select_next_user_agent_from_user_to_agent_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // user:0 (UserMessage)
+    state.selection_index = vec![0]; // user:0 (UserMessage)
 
     state.select_next_user_agent(); // → agent:0a (first of AgentMessage run)
-    assert_eq!(sel(&state), vec![0, 1, 0]);
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
 fn select_next_user_agent_skips_non_ua_types() {
     let mut state = nav_tree();
     // Start on ToolCall — not in UA filtered list; should find next UA node
-    state.selection_index = vec![0, 1, 2]; // tool:0 (ToolCall)
+    state.selection_index = vec![3]; // tool:0 (ToolCall)
 
     state.select_next_user_agent(); // → user:1 (first UA after ToolCall in DFS)
-    assert_eq!(sel(&state), vec![1, 0, 0]);
+    assert_eq!(sel(&state), vec![4]);
 }
 
 #[test]
 fn select_next_user_agent_skips_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 0]; // agent:0a — start of AgentMessage run
+    state.selection_index = vec![1]; // agent:0a — start of AgentMessage run
 
     state.select_next_user_agent(); // → user:1 (skip rest of AgentMessage run)
-    assert_eq!(sel(&state), vec![1, 0, 0]);
+    assert_eq!(sel(&state), vec![4]);
 }
 
 #[test]
 fn select_prev_user_agent_goes_to_run_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 1]; // agent:0b — mid AgentMessage run
+    state.selection_index = vec![2]; // agent:0b — mid AgentMessage run
 
     state.select_prev_user_agent(); // → agent:0a (start of current run)
-    assert_eq!(sel(&state), vec![0, 1, 0]);
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
 fn select_prev_user_agent_from_non_ua_node() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 1, 0]; // think:1 (Thinking — not in UA list)
+    state.selection_index = vec![5]; // think:1 (Thinking — not in UA list)
 
     state.select_prev_user_agent(); // → start of run that ends just before think:1
-    // The last UA node before think:1 in DFS is user:1 [1,0,0] (only 1 node in its run)
-    assert_eq!(sel(&state), vec![1, 0, 0]);
+    // The last UA node before think:1 in DFS is user:1 [4] (only 1 node in its run)
+    assert_eq!(sel(&state), vec![4]);
 }
 
 /// Flat tree: AgentMsg, AgentMsg, ToolCall, AgentMsg, UserMsg — all top-level.
@@ -1353,225 +1259,294 @@ fn select_prev_user_agent_at_run_start_after_tool() {
 
 // ── turn navigation ────────────────────────────────────────────────────────────
 //
-// run_start_tree: one turn whose agent sub-turn ends with three consecutive
-// AgentMessages, used to verify the same-type run-start retreat on `][` / `[]`.
+// `]]`/`[[` move between the starts of top-level UserMessage runs.
 //
-//   [0] turn:rs  Container  group=true
-//     [0,0] user_sub  Container
-//       [0,0,0] user:rs   UserMessage
-//     [0,1] agent_sub  Container
-//       [0,1,0] agent:rs0  AgentMessage   ← run start (target)
-//       [0,1,1] agent:rs1  AgentMessage
-//       [0,1,2] agent:rs2  AgentMessage   ← DFS-last
-
-fn run_start_tree() -> TreeScrollViewState {
-    let turn = turn_group(
-        "turn:rs",
-        vec![
-            sub_turn(
-                "user_sub",
-                vec![
-                    MessageState::new("user:rs")
-                        .message_type(MessageType::UserMessage)
-                        .text("u"),
-                ],
-            ),
-            sub_turn(
-                "agent_sub",
-                vec![
-                    MessageState::new("agent:rs0")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a0"),
-                    MessageState::new("agent:rs1")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a1"),
-                    MessageState::new("agent:rs2")
-                        .message_type(MessageType::AgentMessage)
-                        .text("a2"),
-                ],
-            ),
-        ],
-    );
-    TreeScrollViewState::new(vec![turn])
-}
-
-// Three turns used to verify that mid-run selection triggers advance/retreat to the
-// neighbouring turn rather than landing on the run-start within the current turn.
+// `][`/`[]` move between *turn summaries*: the last run of consecutive
+// AgentMessage/Table nodes in a turn, where a turn extends up to the next top-level
+// user message. Prose the agent emits mid-turn (before another batch of tool calls)
+// is not a summary, and a turn that ends on a tool call has no summary at all.
 //
-//   [0] t:0  group  →  [0,0,0] user:t0   (UserMessage)
-//   [1] t:1  group  →  [1,0,0] agent:t1a, [1,0,1] agent:t1b, [1,0,2] agent:t1c (AgentMessage ×3)
-//   [2] t:2  group  →  [2,0,0] user:t2   (UserMessage)
-//   [3] terminal
-fn three_turn_mid_run_tree() -> TreeScrollViewState {
-    let turn0 = turn_group(
-        "t:0",
-        vec![sub_turn(
-            "u_sub:0",
-            vec![
-                MessageState::new("user:t0")
-                    .message_type(MessageType::UserMessage)
-                    .text("u0"),
-            ],
-        )],
-    );
-    let turn1 = turn_group(
-        "t:1",
-        vec![sub_turn(
-            "a_sub:1",
-            vec![
-                MessageState::new("agent:t1a")
-                    .message_type(MessageType::AgentMessage)
-                    .text("a0"),
-                MessageState::new("agent:t1b")
-                    .message_type(MessageType::AgentMessage)
-                    .text("a1"),
-                MessageState::new("agent:t1c")
-                    .message_type(MessageType::AgentMessage)
-                    .text("a2"),
-            ],
-        )],
-    );
-    let turn2 = turn_group(
-        "t:2",
-        vec![sub_turn(
-            "u_sub:2",
-            vec![
-                MessageState::new("user:t2")
-                    .message_type(MessageType::UserMessage)
-                    .text("u2"),
-            ],
-        )],
-    );
-    TreeScrollViewState::new(vec![turn0, turn1, turn2])
+// nav_tree()'s turn summaries are [1] (agent:0a..agent:0b), [6] (agent:1) and [8]
+// (agent:2).
+
+/// Flat tree with a user message interjected in the middle of agent activity:
+///   [0] user:a   User run
+///   [1] agent:a  ← turn summary (closes the first turn)
+///   [2] tool:a
+///   [3] user:mid User run (the interjection)
+///   [4] agent:b  ← turn summary (closes the second turn)
+///   [5] tool:b
+///   [6] terminal
+fn interjection_tree() -> TreeScrollViewState {
+    TreeScrollViewState::new(vec![
+        node("user:a", MessageType::UserMessage, "ua"),
+        node("agent:a", MessageType::AgentMessage, "aa"),
+        node("tool:a", MessageType::ToolCall, "bash"),
+        node("user:mid", MessageType::UserMessage, "interject"),
+        node("agent:b", MessageType::AgentMessage, "ab"),
+        node("tool:b", MessageType::ToolCall, "bash"),
+    ])
+}
+
+/// Flat tree exercising the three shapes a turn can take:
+///   [0] user:0       turn A
+///   [1] agent:intro    mid-turn prose — NOT a summary
+///   [2] tool:0
+///   [3] agent:sum0   ┐ turn A's summary (Table continues the run)
+///   [4] table:0      ┘
+///   [5] user:1       turn B — ends on a tool call, so it has no summary
+///   [6] tool:1
+///   [7] user:2       turn C
+///   [8] agent:sum2   ← turn C's summary
+///   [9] terminal
+///
+/// Turn summaries: [3], [8].
+fn summary_tree() -> TreeScrollViewState {
+    TreeScrollViewState::new(vec![
+        node("user:0", MessageType::UserMessage, "u0"),
+        node("agent:intro", MessageType::AgentMessage, "on it"),
+        node("tool:0", MessageType::ToolCall, "bash"),
+        node("agent:sum0", MessageType::AgentMessage, "here is what I found"),
+        node("table:0", MessageType::Table, "| a | b |"),
+        node("user:1", MessageType::UserMessage, "u1"),
+        node("tool:1", MessageType::ToolCall, "bash"),
+        node("user:2", MessageType::UserMessage, "u2"),
+        node("agent:sum2", MessageType::AgentMessage, "done"),
+    ])
 }
 
 #[test]
-fn select_next_turn_start_reaches_first_message_of_next_turn() {
+fn select_next_turn_start_reaches_next_user_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // turn 0
+    state.selection_index = vec![0]; // user:0
 
-    state.select_next_turn_start(); // → user:1 (first non-Container in turn 1)
-    assert_eq!(sel(&state), vec![1, 0, 0]);
+    state.select_next_turn_start(); // → user:1, skipping the agent run between
+    assert_eq!(sel(&state), vec![4]);
 }
 
 #[test]
-fn select_next_turn_end_reaches_run_start_of_current_turn_end() {
+fn select_next_turn_start_from_agent_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 0, 0]; // turn 0
+    state.selection_index = vec![2]; // agent:0b — mid agent run
 
-    // DFS-last of turn 0 is result:0 at [0,1,2,0]; it has no same-type sibling,
-    // so the run start is itself.
+    state.select_next_turn_start();
+    assert_eq!(sel(&state), vec![4], "should reach the next user message");
+}
+
+#[test]
+fn select_next_turn_end_reaches_turn_summary() {
+    let mut state = nav_tree();
+    state.selection_index = vec![0]; // user:0
+
+    // Turn 0's closing prose is agent:0a..agent:0b; the run starts at agent:0a.
     state.select_next_turn_end();
-    assert_eq!(sel(&state), vec![0, 1, 2, 0]);
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
-fn select_next_turn_end_retreats_to_same_type_run_start() {
-    let mut state = run_start_tree();
-    state.selection_index = vec![0, 0, 0]; // user:rs
+fn select_next_turn_end_skips_mid_turn_prose() {
+    let mut state = summary_tree();
+    state.selection_index = vec![0]; // user:0
 
-    // DFS-last = agent:rs2 at [0,1,2]; retreats through agent:rs1 and agent:rs0
-    // (same AgentMessage type), landing on run start [0,1,0].
+    // agent:intro at [1] is prose, but more tool calls follow it, so the summary is
+    // the later run at [3].
     state.select_next_turn_end();
-    assert_eq!(sel(&state), vec![0, 1, 0]);
+    assert_eq!(sel(&state), vec![3]);
 }
 
 #[test]
-fn select_next_turn_end_advances_when_already_at_turn_end() {
+fn select_next_turn_end_advances_to_next_turn_summary() {
     let mut state = nav_tree();
-    state.selection_index = vec![0, 1, 2, 0]; // at run-start end of turn 0
+    state.selection_index = vec![1]; // turn 0's summary start
 
-    state.select_next_turn_end(); // → agent:1 (run-start end of turn 1)
-    assert_eq!(sel(&state), vec![1, 1, 1]);
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![6], "→ turn 1's summary");
 }
 
 #[test]
-fn select_next_turn_end_advances_from_mid_run() {
-    let mut state = three_turn_mid_run_tree();
-    state.selection_index = vec![1, 0, 1]; // agent:t1b — past run start [1,0,0]
+fn select_next_turn_end_skips_turn_without_closing_prose() {
+    let mut state = summary_tree();
+    state.selection_index = vec![3]; // turn A's summary
 
-    state.select_next_turn_end(); // → user:t2 (run-start end of turn 2)
-    assert_eq!(sel(&state), vec![2, 0, 0]);
+    // Turn B ends on a tool call and contributes no summary, so ][ goes to turn C's.
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![8]);
 }
 
 #[test]
-fn select_prev_turn_start_reaches_current_turn_start() {
+fn select_prev_turn_start_reaches_current_user_run() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 1, 1]; // mid turn 1, not at its start
+    state.selection_index = vec![6]; // agent:1 — mid turn 1
 
-    state.select_prev_turn_start(); // → user:1 (first non-Container in current turn 1)
-    assert_eq!(sel(&state), vec![1, 0, 0]);
+    state.select_prev_turn_start(); // → user:1
+    assert_eq!(sel(&state), vec![4]);
 }
 
 #[test]
 fn select_prev_turn_start_retreats_to_prev_when_already_at_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 0, 0]; // already at turn_start_path(1)
+    state.selection_index = vec![4]; // already at user:1
 
-    state.select_prev_turn_start(); // → user:0 (first non-Container in turn 0)
-    assert_eq!(sel(&state), vec![0, 0, 0]);
+    state.select_prev_turn_start(); // → user:0
+    assert_eq!(sel(&state), vec![0]);
 }
 
 #[test]
-fn select_prev_turn_end_retreats_when_before_run_start() {
+fn select_prev_turn_end_reaches_current_summary_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 0, 0]; // start of turn 1, before its run-start end [1,1,1]
+    state.selection_index = vec![2]; // agent:0b — inside turn 0's summary run
 
-    // [1,0,0] <= [1,1,1]: already past the end going backwards → retreat to turn 0 end
     state.select_prev_turn_end();
-    assert_eq!(sel(&state), vec![0, 1, 2, 0]);
+    assert_eq!(sel(&state), vec![1], "→ start of the run");
 }
 
 #[test]
-fn select_prev_turn_end_retreats_to_prev_when_already_at_end() {
+fn select_prev_turn_end_run_start_includes_table() {
+    let mut state = summary_tree();
+    state.selection_index = vec![4]; // table:0 — second node of turn A's summary
+
+    // A Table continues an AgentMessage run, so the run start is agent:sum0.
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![3]);
+}
+
+#[test]
+fn select_prev_turn_end_retreats_to_prev_when_already_at_start() {
     let mut state = nav_tree();
-    state.selection_index = vec![1, 1, 1]; // at run-start end of turn 1
+    state.selection_index = vec![6]; // turn 1's summary start
 
-    state.select_prev_turn_end(); // → result:0 (run-start end of turn 0)
-    assert_eq!(sel(&state), vec![0, 1, 2, 0]);
+    state.select_prev_turn_end(); // → turn 0's summary start
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
-fn select_prev_turn_end_lands_on_run_start_from_mid_run() {
-    let mut state = three_turn_mid_run_tree();
-    state.selection_index = vec![1, 0, 1]; // agent:t1b — after run start [1,0,0]
+fn select_prev_turn_end_from_user_message_reaches_prev_summary() {
+    let mut state = nav_tree();
+    state.selection_index = vec![4]; // user:1 — turn 0's summary precedes it
 
-    // [1,0,1] > [1,0,0]: haven't reached the run-start going backwards → jump to it
     state.select_prev_turn_end();
-    assert_eq!(sel(&state), vec![1, 0, 0]);
-}
-
-#[test]
-fn select_prev_turn_end_clamps_at_first_turn() {
-    let mut state = run_start_tree();
-    state.selection_index = vec![0, 0, 0]; // user:rs — before run-start end [0,1,0]
-
-    // [0,0,0] <= [0,1,0]: past end going backwards, but turn_idx=0 → no-op
-    state.select_prev_turn_end();
-    assert_eq!(sel(&state), vec![0, 0, 0]);
+    assert_eq!(sel(&state), vec![1]);
 }
 
 #[test]
 fn turn_nav_clamps_at_boundaries() {
     let mut state = nav_tree();
-    // [[ from the very first node of turn 0: already at turn_start_path(0),
-    // so the "if already there" branch fires; turn_idx == 0 → no-op.
-    state.selection_index = vec![0, 0, 0];
+    // [[ from the first user run start: nothing before it.
+    state.selection_index = vec![0];
     state.select_prev_turn_start();
-    assert_eq!(
-        sel(&state),
-        vec![0, 0, 0],
-        "prev turn start clamps at first turn"
-    );
+    assert_eq!(sel(&state), vec![0], "prev turn start clamps at first turn");
 
-    // ]] from the last turn — no next turn
-    state.selection_index = vec![2, 1, 0];
+    // ]] from the last user run — no user run after it.
+    state.selection_index = vec![7];
     state.select_next_turn_start();
-    assert_eq!(
-        sel(&state),
-        vec![2, 1, 0],
-        "next turn start clamps at last turn"
-    );
+    assert_eq!(sel(&state), vec![7], "next turn start clamps at last turn");
+
+    // [] from the first summary: nothing before it.
+    state.selection_index = vec![1];
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![1], "prev turn end clamps at first summary");
+
+    // ][ from the last summary — no summary after it.
+    state.selection_index = vec![8];
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![8], "next turn end clamps at last summary");
+}
+
+#[test]
+fn turn_nav_treats_interjected_user_message_as_its_own_run() {
+    let mut state = interjection_tree();
+
+    // ]] from user:a skips the agent activity and lands on the interjection.
+    state.selection_index = vec![0];
+    state.select_next_turn_start();
+    assert_eq!(sel(&state), vec![3]);
+
+    // ][ from the interjection lands on the summary of the turn it opened.
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![4]);
+
+    // The interjection bounds the turn on its left too, so [] retreats past it to the
+    // earlier turn's summary.
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![1]);
+}
+
+#[test]
+fn turn_nav_looks_through_markdown_splitter_group_wrapper() {
+    // MarkdownSplitter replaces a root-level message with a zero-height group
+    // Container whose paragraphs live one level down.
+    let mut state = TreeScrollViewState::new(vec![
+        node("user:0", MessageType::UserMessage, "u0"),
+        MessageState::new("split:0")
+            .message_type(MessageType::Container)
+            .group(true)
+            .indent_children(false)
+            .children(vec![
+                node("para:0", MessageType::AgentMessage, "p0"),
+                node("para:1", MessageType::AgentMessage, "p1"),
+            ]),
+        node("user:1", MessageType::UserMessage, "u1"),
+    ]);
+
+    // ][ classifies the wrapper as summary prose and lands on its first paragraph.
+    state.selection_index = vec![0];
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![1, 0]);
+
+    // ]] steps over the wrapper to the next user message.
+    state.select_next_turn_start();
+    assert_eq!(sel(&state), vec![2]);
+
+    // [] comes back to the same paragraph, not to the wrapper itself.
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![1, 0]);
+}
+
+#[test]
+fn turn_nav_treats_non_group_container_as_a_hard_break() {
+    // Cursor's "task" sub-agent grouping is a visible, non-group Container: it is
+    // opaque to turn navigation and separates the prose runs around it.
+    let mut state = TreeScrollViewState::new(vec![
+        node("user:0", MessageType::UserMessage, "u0"),
+        node("agent:0", MessageType::AgentMessage, "a0"),
+        MessageState::new("task:0")
+            .message_type(MessageType::Container)
+            .tag("task")
+            .children(vec![node("sub:0", MessageType::AgentMessage, "s0")]),
+        node("agent:1", MessageType::AgentMessage, "a1"),
+    ]);
+
+    // The container breaks the run, so the summary is agent:1 alone. Were the container
+    // transparent, [1] and [3] would be one run and the summary would start at [1].
+    state.selection_index = vec![0];
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![3]);
+
+    // agent:0 is mid-turn prose, so it is not a summary and [] has nowhere to go.
+    state.select_prev_turn_end();
+    assert_eq!(sel(&state), vec![3]);
+}
+
+#[test]
+fn turn_nav_skips_hidden_nodes_without_breaking_runs() {
+    let mut state = TreeScrollViewState::new(vec![
+        node("user:0", MessageType::UserMessage, "u0"),
+        node("agent:0a", MessageType::AgentMessage, "a0a"),
+        node("meta", MessageType::UserMessage, "meta").hidden(HiddenState::Hidden),
+        node("agent:0b", MessageType::AgentMessage, "a0b"),
+        node("user:1", MessageType::UserMessage, "u1"),
+    ]);
+
+    // The hidden user message neither opens a turn nor splits the prose run, so the
+    // summary is the single run starting at agent:0a.
+    state.selection_index = vec![0];
+    state.select_next_turn_end();
+    assert_eq!(sel(&state), vec![1]);
+
+    // ]] likewise steps over it to the real next user message.
+    state.selection_index = vec![0];
+    state.select_next_turn_start();
+    assert_eq!(sel(&state), vec![4]);
 }
 
 // ── scroll offset preserved on expand ────────────────────────────────────────

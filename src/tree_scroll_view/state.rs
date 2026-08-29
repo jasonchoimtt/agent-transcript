@@ -214,6 +214,34 @@ fn is_nav_target(n: &MessageState) -> bool {
     !n.is_terminal && n.message_type != MessageType::Container
 }
 
+/// Effective message type of a root-level node. Looks through a zero-height `group`
+/// Container (the wrapper `MarkdownSplitter` puts around a split message) to its first
+/// child, since such a wrapper renders its children in its own row position. Any other
+/// Container stays opaque, the same way `is_nav_target` keeps Containers out of `(`/`)`
+/// navigation.
+fn root_message_type(node: &MessageState) -> Option<&MessageType> {
+    if node.message_type == MessageType::Container && node.group && node.expanded {
+        node.children.first().map(|c| &c.message_type)
+    } else {
+        Some(&node.message_type)
+    }
+}
+
+/// A root-level user message: the start of a turn, and the target of `]]` / `[[`.
+fn is_user_root(node: &MessageState) -> bool {
+    matches!(root_message_type(node), Some(MessageType::UserMessage))
+}
+
+/// A root-level node belonging to the agent's turn summary — the closing block of agent
+/// prose, which `MarkdownSplitter` and `TableConverter` break into a run of consecutive
+/// `AgentMessage` and `Table` nodes.
+fn is_summary_root(node: &MessageState) -> bool {
+    matches!(
+        root_message_type(node),
+        Some(MessageType::AgentMessage | MessageType::Table)
+    )
+}
+
 /// Predicate for TreeCursor: only UserMessage and AgentMessage nodes.
 fn is_ua_nav_target(n: &MessageState) -> bool {
     matches!(
@@ -2083,79 +2111,60 @@ impl TreeScrollViewState {
         self.cursor_retreat_run_start(is_ua_nav_target);
     }
 
-    // ]] – first non-Container message in next turn
+    // ]] – start of the next user run
     pub fn select_next_turn_start(&mut self) {
-        let turn_idx = self.selection_index.first().copied().unwrap_or(0);
-        let next = turn_idx + 1;
-        if next >= self.items.len() {
+        let anchor = self.selection_index.first().copied().unwrap_or(0);
+        let Some(idx) = self.next_run_start(anchor, is_user_root) else {
+            return;
+        };
+        self.select_landing(idx);
+    }
+
+    // ][ – start of the next turn summary
+    pub fn select_next_turn_end(&mut self) {
+        let anchor = self.selection_index.first().copied().unwrap_or(0);
+        let starts = self.turn_summary_run_starts();
+        let Some(&idx) = starts.iter().find(|&&s| s > anchor) else {
+            return;
+        };
+        self.select_landing(idx);
+    }
+
+    // [[ – start of the current user run; if already there, the previous one
+    pub fn select_prev_turn_start(&mut self) {
+        let anchor = self.selection_index.first().copied().unwrap_or(0);
+        let Some(idx) = self.run_start_at_or_before(anchor, is_user_root) else {
+            return;
+        };
+        if self.landing_path(idx) != self.selection_index {
+            self.select_landing(idx);
             return;
         }
-        let path = self.turn_start_path(next);
-        self.set_selection(path);
-        self.top_index = self.selection_index.clone();
-        self.top_offset = 0;
-    }
-
-    // ][ – last non-Container message in current turn; if already at or past the run start, advance to next turn end
-    pub fn select_next_turn_end(&mut self) {
-        let turn_idx = self.selection_index.first().copied().unwrap_or(0);
-        let end = self.turn_end_run_start_path(turn_idx);
-        if self.selection_index >= end {
-            let next_end = self.turn_end_run_start_path(turn_idx + 1);
-            self.set_selection(next_end);
-        } else {
-            self.set_selection(end);
-        }
-        self.top_index = self.selection_index.clone();
-        self.top_offset = 0;
-    }
-
-    // [[ – first non-Container message in current turn; if already there, retreat to previous turn first non-Container message
-    pub fn select_prev_turn_start(&mut self) {
-        let raw = self.selection_index.first().copied().unwrap_or(0);
-        let turn_idx = if self.is_terminal_selected() {
-            raw.saturating_sub(1)
-        } else {
-            raw
+        let Some(prev) = idx
+            .checked_sub(1)
+            .and_then(|i| self.run_start_at_or_before(i, is_user_root))
+        else {
+            return;
         };
-        let start = self.turn_start_path(turn_idx);
-        if self.selection_index == start {
-            if turn_idx == 0 {
-                return;
-            }
-            let prev_start = self.turn_start_path(turn_idx - 1);
-            self.set_selection(prev_start);
-        } else {
-            self.set_selection(start);
-        }
-        self.top_index = self.selection_index.clone();
-        self.top_offset = 0;
+        self.select_landing(prev);
     }
 
-    // [] – last non-Container message in current turn; if already at or past the run start, retreat to previous turn end
+    // [] – start of the current turn summary; if already there, the previous one
     pub fn select_prev_turn_end(&mut self) {
-        let raw = self.selection_index.first().copied().unwrap_or(0);
-        let is_terminal = self.is_terminal_selected();
-        let turn_idx = if is_terminal {
-            raw.saturating_sub(1)
-        } else {
-            raw
+        let anchor = self.selection_index.first().copied().unwrap_or(0);
+        let starts = self.turn_summary_run_starts();
+        let mut at_or_before = starts.iter().rev().filter(|&&s| s <= anchor);
+        let Some(&idx) = at_or_before.next() else {
+            return;
         };
-        let end = self.turn_end_run_start_path(turn_idx);
-        // "Past the end going backwards" means selection is at or before the run-start.
-        // Guard against is_terminal: [n] is always lexicographically greater than any
-        // content path, so we must not treat it as "not yet past end".
-        if !is_terminal && self.selection_index <= end {
-            if turn_idx == 0 {
-                return;
-            }
-            let prev_end = self.turn_end_run_start_path(turn_idx - 1);
-            self.set_selection(prev_end);
-        } else {
-            self.set_selection(end);
+        if self.landing_path(idx) != self.selection_index {
+            self.select_landing(idx);
+            return;
         }
-        self.top_index = self.selection_index.clone();
-        self.top_offset = 0;
+        let Some(&prev) = at_or_before.next() else {
+            return;
+        };
+        self.select_landing(prev);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -2166,6 +2175,111 @@ impl TreeScrollViewState {
             self.at_bottom = false;
             self.precedence = Precedence::Selection;
         }
+    }
+
+    /// Root-level indices that occupy a screen row, in order. Hidden nodes are skipped
+    /// entirely, so they neither start nor break an actor run.
+    fn visible_root_indices(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
+        (0..self.items.len()).filter(move |&i| !self.items[i].hidden.is_hidden())
+    }
+
+    fn matches_at(&self, idx: usize, predicate: fn(&MessageState) -> bool) -> bool {
+        self.items.get(idx).is_some_and(predicate)
+    }
+
+    /// Selection path to land on when a turn-navigation scan picks root item `idx`.
+    /// Descends through zero-height group wrappers, which render nothing themselves,
+    /// so the selection lands on the first row the user actually sees.
+    fn landing_path(&self, idx: usize) -> Vec<usize> {
+        let mut path = vec![idx];
+        let Some(mut node) = self.items.get(idx) else {
+            return path;
+        };
+        while node.group && node.expanded {
+            let Some((child_idx, child)) = node
+                .children
+                .iter()
+                .enumerate()
+                .find(|(_, c)| !c.hidden.is_hidden())
+            else {
+                break;
+            };
+            path.push(child_idx);
+            node = child;
+        }
+        path
+    }
+
+    /// Start of the first matching run beginning strictly after the run that contains
+    /// `from`. When `from` is itself inside a matching run, the rest of that run is
+    /// consumed first so the result is always a fresh run.
+    fn next_run_start(&self, from: usize, predicate: fn(&MessageState) -> bool) -> Option<usize> {
+        let mut it = self
+            .visible_root_indices()
+            .filter(|&i| i >= from)
+            .peekable();
+        while it.peek().is_some_and(|&i| self.matches_at(i, predicate)) {
+            it.next();
+        }
+        it.find(|&i| self.matches_at(i, predicate))
+    }
+
+    /// Start of the matching run at or before `from`.
+    fn run_start_at_or_before(
+        &self,
+        from: usize,
+        predicate: fn(&MessageState) -> bool,
+    ) -> Option<usize> {
+        let mut start = self
+            .visible_root_indices()
+            .rev()
+            .filter(|&i| i <= from)
+            .find(|&i| self.matches_at(i, predicate))?;
+        let first = start;
+        for i in self.visible_root_indices().rev().filter(|&i| i < first) {
+            if !self.matches_at(i, predicate) {
+                break;
+            }
+            start = i;
+        }
+        Some(start)
+    }
+
+    /// Start indices of every turn summary, in order.
+    ///
+    /// A turn summary is the *last* run of consecutive `AgentMessage`/`Table` nodes in a
+    /// turn, where a turn runs up to the next root-level user message. Agent prose that
+    /// the model emits mid-turn (before another batch of tool calls) is therefore not a
+    /// summary; only the block that closes the turn is. A turn that ends without any
+    /// agent prose contributes no entry.
+    fn turn_summary_run_starts(&self) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut run_start = None;
+        let mut last_run_in_turn = None;
+        for i in self.visible_root_indices() {
+            let node = &self.items[i];
+            if is_summary_root(node) {
+                run_start.get_or_insert(i);
+                continue;
+            }
+            if let Some(s) = run_start.take() {
+                last_run_in_turn = Some(s);
+            }
+            if is_user_root(node) && let Some(s) = last_run_in_turn.take() {
+                starts.push(s);
+            }
+        }
+        if let Some(s) = run_start.or(last_run_in_turn) {
+            starts.push(s);
+        }
+        starts
+    }
+
+    /// Moves the selection to root item `idx` and scrolls it to the top of the viewport.
+    fn select_landing(&mut self, idx: usize) {
+        self.set_selection(self.landing_path(idx));
+        self.top_index = self.selection_index.clone();
+        self.top_offset = 0;
     }
 
     fn cursor_advance_run_start(&mut self, predicate: fn(&MessageState) -> bool) {
@@ -2288,77 +2402,6 @@ impl TreeScrollViewState {
             }
             self.set_selection(prev_run_start);
         }
-    }
-
-    /// DFS-first non-Container visible path within turn at `turn_idx`.
-    /// Falls back to the turn group node itself if no such path exists.
-    fn turn_start_path(&self, turn_idx: usize) -> Vec<usize> {
-        let turn_item = match self.items.get(turn_idx) {
-            Some(t) if !t.is_terminal => t,
-            _ => return vec![],
-        };
-        TreeCursor::first(&turn_item.children, is_nav_target)
-            .map(|cur| {
-                let mut p = vec![turn_idx];
-                p.extend_from_slice(cur.path());
-                p
-            })
-            .unwrap_or_else(|| vec![turn_idx])
-    }
-
-    /// DFS-last non-Container visible path within turn at `turn_idx`.
-    /// Falls back to the turn group node itself if no such path exists.
-    fn turn_end_path(&self, turn_idx: usize) -> Vec<usize> {
-        let turn_item = match self.items.get(turn_idx) {
-            Some(t) if !t.is_terminal => t,
-            _ => return vec![],
-        };
-        TreeCursor::last(&turn_item.children, is_nav_target)
-            .map(|cur| {
-                let mut p = vec![turn_idx];
-                p.extend_from_slice(cur.path());
-                p
-            })
-            .unwrap_or_else(|| vec![turn_idx])
-    }
-
-    /// Like `turn_end_path`, but retreats to the start of the same-type sibling
-    /// run at the found node's level (e.g. `[U,T,A,T,A,A,A]` → items[4]).
-    fn turn_end_run_start_path(&self, turn_idx: usize) -> Vec<usize> {
-        let end_path = self.turn_end_path(turn_idx);
-        if end_path.is_empty() {
-            return end_path;
-        }
-        let end_type = match get_node(&self.items, &end_path) {
-            Some(n) => n.message_type.clone(),
-            None => return end_path,
-        };
-        let parent_depth = end_path.len() - 1;
-        let last_idx = *end_path.last().unwrap();
-        let siblings: &[MessageState] = if parent_depth == 0 {
-            &self.items
-        } else {
-            match get_node(&self.items, &end_path[..parent_depth]) {
-                Some(n) => &n.children,
-                None => return end_path,
-            }
-        };
-        let mut run_start = last_idx;
-        while run_start > 0 {
-            let prev = &siblings[run_start - 1];
-            // Table nodes are treated as part of an AgentMessage run (workaround).
-            let in_run = is_nav_target(prev)
-                && (prev.message_type == end_type
-                    || (end_type == MessageType::AgentMessage
-                        && prev.message_type == MessageType::Table));
-            if !in_run {
-                break;
-            }
-            run_start -= 1;
-        }
-        let mut path = end_path[..parent_depth].to_vec();
-        path.push(run_start);
-        path
     }
 
     /// Apply a `TreeAction` to this state, handling all pure-tree actions.

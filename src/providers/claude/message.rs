@@ -5,15 +5,10 @@ use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
 #[derive(Default)]
 pub struct ParseState {
-    pub turn_n: usize,
-    pub current_turn_has_agent_event: bool,
     pub seen_uuids: HashSet<String>,
     pub seen_block_ids: HashSet<String>,
-    pub containers_emitted: HashSet<String>,
     pub pending_tool_calls: HashMap<String, serde_json::Value>,
-    pub current_turn_id: String,
     pub id_prefix: String,
-    pub suppress_containers: bool,
     /// UUIDs of `compact_boundary` system entries; used to tag the injected summary user message.
     pub compact_boundary_uuids: HashSet<String>,
 }
@@ -273,77 +268,23 @@ fn emit_attachment_node(
     let text = attachment_label(att);
     let node_id = format!("{}attachment:{}", prefix, uuid);
 
-    let mut ops = Vec::new();
+    let node = MessageState::new(node_id.clone())
+        .text(text)
+        .data(obj.to_string())
+        .message_type(MessageType::UserMessage)
+        .tag("attachment");
 
-    if !state.suppress_containers {
-        let turn_id = format!("turn:{}", state.turn_n);
-        let user_turn_id = format!("user_turn:{}", state.turn_n);
-
-        if !state.containers_emitted.contains(&turn_id) {
-            state.containers_emitted.insert(turn_id.clone());
-            state.current_turn_id = turn_id.clone();
-            ops.push(TreeOperation::Append {
-                parent_id: None,
-                message: MessageState::new(turn_id.clone())
-                    .brief(format!("Turn {}", state.turn_n))
-                    .group(true)
-                    .message_type(MessageType::Container)
-                    .tag("turn")
-                    .indent_children(false),
-            });
-        }
-
-        if !state.containers_emitted.contains(&user_turn_id) {
-            state.containers_emitted.insert(user_turn_id.clone());
-            ops.push(TreeOperation::Append {
-                parent_id: Some(turn_id),
-                message: MessageState::new(user_turn_id.clone())
-                    .text("User")
-                    .data(serde_json::json!({ "type": &user_turn_id }).to_string())
-                    .message_type(MessageType::Container)
-                    .tag("user-turn")
-                    .indent_children(false),
-            });
-        }
-
-        let node = MessageState::new(node_id.clone())
-            .text(text)
-            .data(obj.to_string())
-            .message_type(MessageType::UserMessage)
-            .tag("attachment");
-
-        if state.seen_uuids.insert(uuid) {
-            ops.push(TreeOperation::Append {
-                parent_id: Some(user_turn_id),
-                message: node,
-            });
-        } else {
-            ops.push(TreeOperation::Replace {
-                id: node_id,
-                message: node,
-            });
-        }
+    if state.seen_uuids.insert(uuid) {
+        vec![TreeOperation::Append {
+            parent_id: None,
+            message: node,
+        }]
     } else {
-        let node = MessageState::new(node_id.clone())
-            .text(text)
-            .data(obj.to_string())
-            .message_type(MessageType::UserMessage)
-            .tag("attachment");
-
-        if state.seen_uuids.insert(uuid) {
-            ops.push(TreeOperation::Append {
-                parent_id: None,
-                message: node,
-            });
-        } else {
-            ops.push(TreeOperation::Replace {
-                id: node_id,
-                message: node,
-            });
-        }
+        vec![TreeOperation::Replace {
+            id: node_id,
+            message: node,
+        }]
     }
-
-    ops
 }
 
 fn emit_user_message(
@@ -365,107 +306,33 @@ fn emit_user_message(
         .map(|p| state.compact_boundary_uuids.contains(p))
         .unwrap_or(false);
 
-    let mut ops = Vec::new();
-
-    // Advance turn if the previous turn had agent content
-    if state.current_turn_has_agent_event {
-        state.turn_n += 1;
-        state.current_turn_has_agent_event = false;
+    let mut node = MessageState::new(user_msg_id.clone())
+        .text(text)
+        .data(obj.to_string())
+        .message_type(MessageType::UserMessage)
+        .hidden(if is_meta {
+            HiddenState::Hidden
+        } else {
+            HiddenState::NotHidden
+        });
+    if let Some(tag) = xml_tag {
+        node = node.tag(tag);
+    }
+    if is_compaction_summary {
+        node = node.tag("summary").brief("[Conversation summary]");
     }
 
-    if !state.suppress_containers {
-        let turn_id = format!("turn:{}", state.turn_n);
-        let user_turn_id = format!("user_turn:{}", state.turn_n);
-
-        if !state.containers_emitted.contains(&turn_id) {
-            state.containers_emitted.insert(turn_id.clone());
-            state.current_turn_id = turn_id.clone();
-            let brief = {
-                let first = text.lines().next().unwrap_or("").trim();
-                if first.is_empty() {
-                    format!("Turn {}", state.turn_n)
-                } else {
-                    first.to_string()
-                }
-            };
-            ops.push(TreeOperation::Append {
-                parent_id: None,
-                message: MessageState::new(turn_id.clone())
-                    .brief(brief)
-                    .group(true)
-                    .message_type(MessageType::Container)
-                    .tag("turn")
-                    .indent_children(false),
-            });
-        }
-
-        if !state.containers_emitted.contains(&user_turn_id) {
-            state.containers_emitted.insert(user_turn_id.clone());
-            ops.push(TreeOperation::Append {
-                parent_id: Some(turn_id),
-                message: MessageState::new(user_turn_id.clone())
-                    .text("User")
-                    .data(serde_json::json!({ "type": &user_turn_id }).to_string())
-                    .message_type(MessageType::Container)
-                    .tag("user-turn")
-                    .indent_children(false),
-            });
-        }
-
-        let mut node = MessageState::new(user_msg_id.clone())
-            .text(text)
-            .data(obj.to_string())
-            .message_type(MessageType::UserMessage)
-            .hidden(if is_meta {
-                HiddenState::Hidden
-            } else {
-                HiddenState::NotHidden
-            });
-        if let Some(tag) = xml_tag {
-            node = node.tag(tag);
-        }
-        if is_compaction_summary {
-            node = node.tag("summary").brief("[Conversation summary]");
-        }
-
-        if state.seen_uuids.insert(uuid) {
-            ops.push(TreeOperation::Append {
-                parent_id: Some(user_turn_id),
-                message: node,
-            });
-        } else {
-            ops.push(TreeOperation::Replace {
-                id: user_msg_id,
-                message: node,
-            });
-        }
+    if state.seen_uuids.insert(uuid) {
+        vec![TreeOperation::Append {
+            parent_id: None,
+            message: node,
+        }]
     } else {
-        // suppress_containers: all content at root level
-        let mut node = MessageState::new(user_msg_id.clone())
-            .text(text)
-            .data(obj.to_string())
-            .message_type(MessageType::UserMessage);
-        if let Some(tag) = xml_tag {
-            node = node.tag(tag);
-        }
-        if is_compaction_summary {
-            node = node.tag("summary").brief("[Conversation summary]");
-        }
-
-        if state.seen_uuids.insert(uuid) {
-            ops.push(TreeOperation::Append {
-                parent_id: None,
-                message: node,
-            });
-        } else {
-            ops.push(TreeOperation::Replace {
-                id: user_msg_id,
-                message: node,
-            });
-        }
+        vec![TreeOperation::Replace {
+            id: user_msg_id,
+            message: node,
+        }]
     }
-
-    ops
 }
 
 fn emit_assistant_blocks(
@@ -482,31 +349,6 @@ fn emit_assistant_blocks(
     }
 
     let mut ops = Vec::new();
-    let agent_turn_id = format!("agent_turn:{}", state.turn_n);
-
-    if !state.suppress_containers && !state.containers_emitted.contains(&agent_turn_id) {
-        state.containers_emitted.insert(agent_turn_id.clone());
-        let parent = if state.current_turn_id.is_empty() {
-            None
-        } else {
-            Some(state.current_turn_id.clone())
-        };
-        ops.push(TreeOperation::Append {
-            parent_id: parent,
-            message: MessageState::new(agent_turn_id.clone())
-                .text("Agent")
-                .data(serde_json::json!({ "type": &agent_turn_id }).to_string())
-                .message_type(MessageType::Container)
-                .tag("agent-turn")
-                .indent_children(false),
-        });
-    }
-
-    let container_parent: Option<String> = if state.suppress_containers {
-        None
-    } else {
-        Some(agent_turn_id)
-    };
 
     for (idx, block) in content_arr.iter().enumerate() {
         let block_type = block["type"].as_str().unwrap_or("");
@@ -520,7 +362,7 @@ fn emit_assistant_blocks(
                     .message_type(MessageType::Thinking);
                 if state.seen_block_ids.insert(node_id.clone()) {
                     ops.push(TreeOperation::Append {
-                        parent_id: container_parent.clone(),
+                        parent_id: None,
                         message: node,
                     });
                 } else {
@@ -529,7 +371,6 @@ fn emit_assistant_blocks(
                         message: node,
                     });
                 }
-                state.current_turn_has_agent_event = true;
             }
             "text" => {
                 let text = block["text"].as_str().unwrap_or("").to_string();
@@ -540,7 +381,7 @@ fn emit_assistant_blocks(
                     .message_type(MessageType::AgentMessage);
                 if state.seen_block_ids.insert(node_id.clone()) {
                     ops.push(TreeOperation::Append {
-                        parent_id: container_parent.clone(),
+                        parent_id: None,
                         message: node,
                     });
                 } else {
@@ -549,7 +390,6 @@ fn emit_assistant_blocks(
                         message: node,
                     });
                 }
-                state.current_turn_has_agent_event = true;
             }
             "tool_use" => {
                 let tool_id = block["id"].as_str().unwrap_or("").to_string();
@@ -564,7 +404,7 @@ fn emit_assistant_blocks(
                 }
                 if state.seen_block_ids.insert(node_id.clone()) {
                     ops.push(TreeOperation::Append {
-                        parent_id: container_parent.clone(),
+                        parent_id: None,
                         message: node,
                     });
                 } else {
@@ -582,7 +422,6 @@ fn emit_assistant_blocks(
                         ops.extend(on_agent_tool(&tool_id, description, false)?);
                     }
                 }
-                state.current_turn_has_agent_event = true;
             }
             _ => {}
         }
@@ -848,8 +687,31 @@ fn extract_tool_result_text(content: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    fn append_ids(ops: &[TreeOperation]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                TreeOperation::Append { message, .. } => Some(message.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn all_appends_at_root(ops: &[TreeOperation]) -> bool {
+        ops.iter().all(|op| match op {
+            TreeOperation::Append { parent_id, .. } => parent_id.is_none(),
+            _ => true,
+        })
+    }
+
+    fn has_container(ops: &[TreeOperation]) -> bool {
+        ops.iter().any(|op| match op {
+            TreeOperation::Append { message, .. } => message.message_type == MessageType::Container,
+            _ => false,
+        })
+    }
+
     #[test]
-    fn test_plain_user_message_opens_turn() {
+    fn test_plain_user_message_appends_at_root() {
         let entry = serde_json::json!({
             "type": "user",
             "uuid": "uuid-001",
@@ -870,9 +732,12 @@ mod tests {
             })
             .collect();
 
-        assert!(ids.contains(&"turn:0".to_string()), "should emit turn:0");
-        assert!(ids.contains(&"user_turn:0".to_string()));
         assert!(ids.iter().any(|id| id.starts_with("user_msg:")));
+        assert!(
+            all_appends_at_root(&ops),
+            "user message should be appended at root level"
+        );
+        assert!(!has_container(&ops), "no Container nodes should be emitted");
     }
 
     #[test]
@@ -935,8 +800,6 @@ mod tests {
         .to_string();
 
         let mut state = ParseState::default();
-        // Ensure agent_turn container is present
-        state.containers_emitted.insert("agent_turn:0".to_string());
 
         let ops = parse_entry(&entry, &mut state).unwrap();
         let ids: Vec<_> = ops
@@ -947,7 +810,6 @@ mod tests {
             })
             .collect();
         assert!(ids.iter().any(|id| id.starts_with("text:")));
-        assert!(state.current_turn_has_agent_event);
     }
 
     #[test]
@@ -965,7 +827,6 @@ mod tests {
         .to_string();
 
         let mut state = ParseState::default();
-        state.containers_emitted.insert("agent_turn:0".to_string());
 
         let ops = parse_entry(&entry, &mut state).unwrap();
         let msg = ops.iter().find_map(|op| match op {
@@ -998,7 +859,6 @@ mod tests {
         .to_string();
 
         let mut state = ParseState::default();
-        state.containers_emitted.insert("agent_turn:0".to_string());
 
         let ops = parse_entry(&entry, &mut state).unwrap();
         let tool_op = ops.iter().find_map(|op| match op {
@@ -1069,10 +929,9 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_increments_on_agent_event_then_user() {
+    fn test_consecutive_user_messages_both_append_at_root() {
         let mut state = ParseState::default();
 
-        // First user message
         let u1 = serde_json::json!({
             "type": "user",
             "uuid": "u1",
@@ -1080,13 +939,6 @@ mod tests {
             "message": {"role": "user", "content": "hello"}
         })
         .to_string();
-        parse_entry(&u1, &mut state).unwrap();
-        assert_eq!(state.turn_n, 0);
-
-        // Mark agent event happened
-        state.current_turn_has_agent_event = true;
-
-        // Second user message should increment turn
         let u2 = serde_json::json!({
             "type": "user",
             "uuid": "u2",
@@ -1094,24 +946,22 @@ mod tests {
             "message": {"role": "user", "content": "follow up"}
         })
         .to_string();
-        let ops = parse_entry(&u2, &mut state).unwrap();
-        assert_eq!(state.turn_n, 1);
 
-        let ids: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TreeOperation::Append { message, .. } => Some(message.id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(ids.contains(&"turn:1".to_string()));
-        assert!(ids.contains(&"user_turn:1".to_string()));
+        let mut ops = parse_entry(&u1, &mut state).unwrap();
+        ops.extend(parse_entry(&u2, &mut state).unwrap());
+
+        assert_eq!(
+            append_ids(&ops),
+            vec!["user_msg:u1", "user_msg:u2"],
+            "back-to-back user messages must not be split or wrapped"
+        );
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
     }
 
     #[test]
-    fn test_tool_result_does_not_start_new_turn() {
+    fn test_tool_result_nests_under_its_tool_call() {
         let mut state = ParseState::default();
-        state.current_turn_has_agent_event = true;
         state.pending_tool_calls.insert(
             "toolu_xyz".to_string(),
             serde_json::json!({"type": "tool_use", "id": "toolu_xyz", "name": "Read", "input": {}}),
@@ -1128,13 +978,67 @@ mod tests {
         })
         .to_string();
 
-        parse_entry(&entry, &mut state).unwrap();
-        // turn_n should NOT have changed (tool result, not a new user prompt)
-        assert_eq!(state.turn_n, 0, "tool result must not trigger a new turn");
+        let ops = parse_entry(&entry, &mut state).unwrap();
+
+        // A tool result is not a new user prompt: it produces no root-level node.
+        for op in &ops {
+            if let TreeOperation::Append { parent_id, .. } = op {
+                assert_eq!(parent_id.as_deref(), Some("tool_call:toolu_xyz"));
+            }
+        }
+        assert!(!has_container(&ops));
+    }
+
+    /// A scripted round-trip: everything the agent emits lands at root level, except
+    /// tool results, which nest under the tool call they answer.
+    #[test]
+    fn test_round_trip_emits_flat_tree() {
+        let mut state = ParseState::default();
+        let entries = [
+            serde_json::json!({
+                "type": "user", "uuid": "rt-u1", "parentUuid": null,
+                "message": {"role": "user", "content": "please read the file"}
+            }),
+            serde_json::json!({
+                "type": "assistant", "uuid": "rt-a1", "parentUuid": "rt-u1",
+                "message": {"role": "assistant", "id": "rt_msg1", "content": [
+                    {"type": "text", "text": "sure"},
+                    {"type": "tool_use", "id": "rt_tool", "name": "Read", "input": {}}
+                ]}
+            }),
+            serde_json::json!({
+                "type": "user", "uuid": "rt-tr", "parentUuid": "rt-a1",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "rt_tool", "content": "contents"}
+                ]}
+            }),
+            serde_json::json!({
+                "type": "user", "uuid": "rt-u2", "parentUuid": "rt-tr",
+                "message": {"role": "user", "content": "thanks"}
+            }),
+        ];
+
+        let mut ops = Vec::new();
+        for entry in &entries {
+            ops.extend(parse_entry(&entry.to_string(), &mut state).unwrap());
+        }
+
+        assert!(!has_container(&ops), "no turn containers should be emitted");
+        for op in &ops {
+            if let TreeOperation::Append { parent_id, message } = op {
+                match parent_id.as_deref() {
+                    None => {}
+                    Some("tool_call:rt_tool") => {
+                        assert_eq!(message.message_type, MessageType::ToolResult)
+                    }
+                    Some(other) => panic!("unexpected parent {other} for {}", message.id),
+                }
+            }
+        }
     }
 
     #[test]
-    fn test_suppress_containers_no_turn_nodes() {
+    fn test_subagent_prefix_still_flattens() {
         let entry = serde_json::json!({
             "type": "user",
             "uuid": "sa-uuid-001",
@@ -1145,43 +1049,17 @@ mod tests {
 
         let mut state = ParseState {
             id_prefix: "sa:abc:".to_string(),
-            suppress_containers: true,
             ..Default::default()
         };
         let ops = parse_entry(&entry, &mut state).unwrap();
 
-        let has_container = ops.iter().any(|op| match op {
-            TreeOperation::Append { message, .. } => message.message_type == MessageType::Container,
-            _ => false,
-        });
-        assert!(
-            !has_container,
-            "suppress_containers should emit no Container nodes"
-        );
-
-        let user_msg = ops.iter().find_map(|op| match op {
-            TreeOperation::Append { message, .. }
-                if message.id == "sa:abc:user_msg:sa-uuid-001" =>
-            {
-                Some(message)
-            }
-            _ => None,
-        });
-        assert!(user_msg.is_some(), "should emit user_msg with prefix");
-
-        // parent_id should be None for all ops
-        for op in &ops {
-            if let TreeOperation::Append { parent_id, .. } = op {
-                assert!(
-                    parent_id.is_none(),
-                    "suppress_containers: all appends at root level"
-                );
-            }
-        }
+        assert_eq!(append_ids(&ops), vec!["sa:abc:user_msg:sa-uuid-001"]);
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
     }
 
     #[test]
-    fn test_suppress_containers_assistant_no_container() {
+    fn test_assistant_blocks_append_at_root() {
         let entry = serde_json::json!({
             "type": "assistant",
             "uuid": "sa-a01",
@@ -1199,16 +1077,12 @@ mod tests {
 
         let mut state = ParseState {
             id_prefix: "sa:abc:".to_string(),
-            suppress_containers: true,
             ..Default::default()
         };
         let ops = parse_entry(&entry, &mut state).unwrap();
 
-        let has_container = ops.iter().any(|op| match op {
-            TreeOperation::Append { message, .. } => message.message_type == MessageType::Container,
-            _ => false,
-        });
-        assert!(!has_container);
+        assert!(!has_container(&ops));
+        assert!(all_appends_at_root(&ops));
 
         let thinking_id = "sa:abc:thinking:sa-msg-001:0";
         let text_id = "sa:abc:text:sa-msg-001:1";
@@ -1236,8 +1110,6 @@ mod tests {
         let mut state = ParseState::default();
         // Pre-populate as if already seen
         state.seen_uuids.insert("dup-uuid".to_string());
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
 
         let ops = parse_entry(&entry, &mut state).unwrap();
         let has_replace = ops
@@ -1251,7 +1123,6 @@ mod tests {
         let mut state = ParseState::default();
         // Pre-populate as if the block was already appended to the tree.
         state.seen_block_ids.insert("text:msg_dup:0".to_string());
-        state.containers_emitted.insert("agent_turn:0".to_string());
 
         let entry = serde_json::json!({
             "type": "assistant",
@@ -1277,8 +1148,6 @@ mod tests {
         // Claude Code streams thinking and text as separate JSONL entries sharing a msg_id.
         // The second entry (text-only) must be Append'd, not Replace'd.
         let mut state = ParseState::default();
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("agent_turn:0".to_string());
 
         let thinking_entry = serde_json::json!({
             "type": "assistant",
@@ -1436,9 +1305,6 @@ mod tests {
     #[test]
     fn test_task_notification_shows_summary_and_updates_task_summary_node() {
         let mut state = ParseState::default();
-        // Pre-populate a TaskSummary node as if the async Agent tool_use already ran.
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
 
         let tool_use_id = "toolu_async_001";
         let notification_content = format!(
@@ -1504,8 +1370,6 @@ mod tests {
         state
             .compact_boundary_uuids
             .insert(boundary_uuid.to_string());
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
 
         let entry = serde_json::json!({
             "type": "user",
@@ -1649,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attachment_creates_turn_containers_when_none_exist() {
+    fn test_attachment_appends_at_root() {
         let entry = serde_json::json!({
             "type": "attachment",
             "uuid": "att-uuid-002",
@@ -1661,73 +1525,15 @@ mod tests {
         let mut state = ParseState::default();
         let ops = parse_entry(&entry, &mut state).unwrap();
 
-        let ids: Vec<_> = ops
-            .iter()
-            .filter_map(|op| match op {
-                TreeOperation::Append { message, .. } => Some(message.id.clone()),
-                _ => None,
-            })
-            .collect();
-
-        assert!(ids.contains(&"turn:0".to_string()), "should create turn:0");
-        assert!(
-            ids.contains(&"user_turn:0".to_string()),
-            "should create user_turn:0"
-        );
-        assert!(
-            ids.contains(&"attachment:att-uuid-002".to_string()),
-            "should emit attachment node"
-        );
-        // turn_n must NOT have advanced
-        assert_eq!(state.turn_n, 0, "attachment must not advance turn counter");
-    }
-
-    #[test]
-    fn test_attachment_reuses_existing_turn_containers() {
-        let mut state = ParseState::default();
-        // Simulate that a user message already created containers
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
-        state.current_turn_id = "turn:0".to_string();
-
-        let entry = serde_json::json!({
-            "type": "attachment",
-            "uuid": "att-uuid-003",
-            "parentUuid": "prev",
-            "attachment": {"type": "command_permissions", "allowedTools": []}
-        })
-        .to_string();
-
-        let ops = parse_entry(&entry, &mut state).unwrap();
-
-        // Should not re-emit the containers
-        let container_ops: Vec<_> = ops
-            .iter()
-            .filter(|op| match op {
-                TreeOperation::Append { message, .. } => {
-                    message.message_type == MessageType::Container
-                }
-                _ => false,
-            })
-            .collect();
-        assert!(
-            container_ops.is_empty(),
-            "should not re-emit existing containers"
-        );
-
-        let att_op = ops.iter().find(|op| match op {
-            TreeOperation::Append { message, .. } => message.id == "attachment:att-uuid-003",
-            _ => false,
-        });
-        assert!(att_op.is_some(), "should still emit the attachment node");
+        assert_eq!(append_ids(&ops), vec!["attachment:att-uuid-002"]);
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
     }
 
     #[test]
     fn test_attachment_duplicate_uuid_emits_replace() {
         let mut state = ParseState::default();
         state.seen_uuids.insert("att-dup".to_string());
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
 
         let entry = serde_json::json!({
             "type": "attachment",
@@ -1799,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn test_attachment_suppress_containers_at_root() {
+    fn test_attachment_with_subagent_prefix_at_root() {
         let entry = serde_json::json!({
             "type": "attachment",
             "uuid": "att-sa-001",
@@ -1810,30 +1616,13 @@ mod tests {
 
         let mut state = ParseState {
             id_prefix: "sa:xyz:".to_string(),
-            suppress_containers: true,
             ..Default::default()
         };
         let ops = parse_entry(&entry, &mut state).unwrap();
 
-        let has_container = ops.iter().any(|op| match op {
-            TreeOperation::Append { message, .. } => message.message_type == MessageType::Container,
-            _ => false,
-        });
-        assert!(!has_container, "suppress_containers: no Container nodes");
-
-        let msg = ops.iter().find_map(|op| match op {
-            TreeOperation::Append {
-                parent_id, message, ..
-            } if message.id == "sa:xyz:attachment:att-sa-001" => {
-                assert!(
-                    parent_id.is_none(),
-                    "suppress_containers: attachment appended at root"
-                );
-                Some(message)
-            }
-            _ => None,
-        });
-        assert!(msg.is_some(), "should emit attachment node with prefix");
+        assert_eq!(append_ids(&ops), vec!["sa:xyz:attachment:att-sa-001"]);
+        assert!(all_appends_at_root(&ops));
+        assert!(!has_container(&ops));
     }
 
     #[test]
@@ -1842,8 +1631,6 @@ mod tests {
         state
             .compact_boundary_uuids
             .insert("boundary-001".to_string());
-        state.containers_emitted.insert("turn:0".to_string());
-        state.containers_emitted.insert("user_turn:0".to_string());
 
         let entry = serde_json::json!({
             "type": "user",
