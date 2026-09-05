@@ -247,6 +247,10 @@ pub struct DiffLine {
 /// - ≤10 lines in block, or pure deletion (no adds) → full diff
 /// - >10 lines with adds → new-version mode (`RemovedHidden` + `Changed`; cap 30)
 ///
+/// In compact mode (`show_full = false`), the `Added`, `Removed`, and `Changed` lines in the
+/// hunk are each independently capped at 30 total, so e.g. a pure-addition or pure-deletion
+/// block can't blow up the compact view. `show_full = true` (expanded) never truncates.
+///
 /// `context_limit` trims context lines to at most that many per change-block boundary.
 /// `None` means keep all context.
 ///
@@ -325,21 +329,26 @@ pub fn build_diff_lines(
     // Filter context runs if a limit is set.
     let filtered = apply_context_limit(&raw_lines, context_limit);
 
-    // Truncate Changed lines at 30 total.
-    let total_changed = filtered
-        .iter()
-        .filter(|(k, _)| *k == DiffLineKind::Changed)
-        .count();
-    let truncate_at = if total_changed > 30 {
-        Some(30usize)
-    } else {
-        None
+    // In compact mode, cap each of Added/Removed/Changed at 30 total (independently) so a
+    // single pure-addition, pure-deletion, or new-version-mode block can't blow up the view.
+    // Expanded mode (show_full) never truncates.
+    let line_limit = |kind: DiffLineKind| -> Option<usize> {
+        if show_full {
+            return None;
+        }
+        let count = filtered.iter().filter(|(k, _)| *k == kind).count();
+        (count > 30).then_some(30)
     };
+    let changed_limit = line_limit(DiffLineKind::Changed);
+    let added_limit = line_limit(DiffLineKind::Added);
+    let removed_limit = line_limit(DiffLineKind::Removed);
 
     // Assign line numbers and apply truncation.
     let mut old_n = hunk.old_start;
     let mut new_n = hunk.new_start;
     let mut changed_seen = 0usize;
+    let mut added_seen = 0usize;
+    let mut removed_seen = 0usize;
     let mut truncated = 0usize;
     let mut result = Vec::new();
 
@@ -350,16 +359,33 @@ pub fn build_diff_lines(
             continue;
         }
 
-        if let Some(limit) = truncate_at
-            && *kind == DiffLineKind::Changed
-        {
-            if changed_seen >= limit {
-                truncated += 1;
-                continue;
+        let skip = match kind {
+            DiffLineKind::Changed => {
+                let skip = changed_limit.is_some_and(|limit| changed_seen >= limit);
+                if !skip {
+                    changed_seen += 1;
+                }
+                skip
             }
-            changed_seen += 1;
-        }
+            DiffLineKind::Added => {
+                let skip = added_limit.is_some_and(|limit| added_seen >= limit);
+                if !skip {
+                    added_seen += 1;
+                }
+                skip
+            }
+            DiffLineKind::Removed => {
+                let skip = removed_limit.is_some_and(|limit| removed_seen >= limit);
+                if !skip {
+                    removed_seen += 1;
+                }
+                skip
+            }
+            DiffLineKind::Context => false,
+            DiffLineKind::RemovedHidden => unreachable!(),
+        };
 
+        // Line numbers still advance for skipped lines so subsequent shown lines stay correct.
         let (old_num, new_num) = match kind {
             DiffLineKind::Context => {
                 let o = Some(old_n);
@@ -380,6 +406,11 @@ pub fn build_diff_lines(
             }
             DiffLineKind::RemovedHidden => unreachable!(),
         };
+
+        if skip {
+            truncated += 1;
+            continue;
+        }
 
         result.push(DiffLine {
             old_num,
@@ -685,6 +716,87 @@ mod tests {
                 .count(),
             12
         );
+    }
+
+    #[test]
+    fn pure_addition_truncated_to_30_in_compact_mode() {
+        // 50 pure-addition lines (no removes) in compact mode should be capped at 30.
+        let lines: Vec<&str> = (0..50).flat_map(|_| ["+added"].into_iter()).collect();
+        let hunk = make_hunk(&lines);
+        let (result, hidden) = build_diff_lines(&hunk, false, None);
+        assert_eq!(hidden, 20);
+        assert_eq!(
+            result
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Added)
+                .count(),
+            30
+        );
+    }
+
+    #[test]
+    fn pure_deletion_truncated_to_30_in_compact_mode() {
+        // 50 pure-deletion lines in compact mode should be capped at 30.
+        let lines: Vec<&str> = (0..50).flat_map(|_| ["-removed"].into_iter()).collect();
+        let hunk = make_hunk(&lines);
+        let (result, hidden) = build_diff_lines(&hunk, false, None);
+        assert_eq!(hidden, 20);
+        assert_eq!(
+            result
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Removed)
+                .count(),
+            30
+        );
+    }
+
+    #[test]
+    fn expanded_mode_never_truncates_added_or_removed() {
+        // show_full=true must show everything, even past the 30-line compact cap.
+        let added_lines: Vec<&str> = (0..50).flat_map(|_| ["+added"].into_iter()).collect();
+        let added_hunk = make_hunk(&added_lines);
+        let (result, hidden) = build_diff_lines(&added_hunk, true, None);
+        assert_eq!(hidden, 0);
+        assert_eq!(
+            result
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Added)
+                .count(),
+            50
+        );
+
+        let removed_lines: Vec<&str> = (0..50).flat_map(|_| ["-removed"].into_iter()).collect();
+        let removed_hunk = make_hunk(&removed_lines);
+        let (result, hidden) = build_diff_lines(&removed_hunk, true, None);
+        assert_eq!(hidden, 0);
+        assert_eq!(
+            result
+                .iter()
+                .filter(|l| l.kind == DiffLineKind::Removed)
+                .count(),
+            50
+        );
+    }
+
+    #[test]
+    fn line_numbers_after_truncated_addition_block_are_correct() {
+        // A context line after a truncated pure-addition block must still get the correct
+        // new_num, accounting for all 50 added lines (not just the 30 that were kept).
+        let mut lines: Vec<String> = (0..50).map(|_| "+added".to_string()).collect();
+        lines.push(" after".to_string());
+        let hunk = PatchHunk {
+            lines,
+            old_start: 10,
+            old_lines: 1,
+            new_start: 10,
+            new_lines: 51,
+        };
+        let (result, hidden) = build_diff_lines(&hunk, false, None);
+        assert_eq!(hidden, 20);
+        let after = result.last().unwrap();
+        assert_eq!(after.kind, DiffLineKind::Context);
+        assert_eq!(after.old_num, Some(10));
+        assert_eq!(after.new_num, Some(60));
     }
 
     #[test]
