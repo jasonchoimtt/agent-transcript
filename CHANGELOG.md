@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/jasonchoimtt/agent-transcript/compare/v0.1.1...v0.1.2) - 2026-09-05
+
+### Added
+
+- concurrent Collecting/Grouped states in ToolGrouper for sub-agent tool calls
+- debug/trace logging for transforms and --trace parse flag; fix ops breaking collecting runs
+- parse --debug-transform flag
+- track user-modified node flags with dirty bit for selective reset snapshot
+
+### Fixed
+
+- show description and collapse for Bash tool instead
+- *(tool_grouper)* don't let hidden nodes fragment tool-call runs
+- cap Added/Removed diff lines at 30 in compact tool-result view
+- *(claude crop)* recognize titled dividers on the upper prompt-box border
+- *(claude jsonl)* stop treating logicalParentUuid as a reorder dependency
+- account for collapsed-crop offset in PTY cursor and mouse translation
+- waterfall counting should exclude non-uuid messages
+- *(claude path)* treat tool_use messages as can_dangle like tool_result
+- waterfall snapshot exits prematurely when reorder queue drains before EOF
+- *(claude reader)* init subagent reader first to fix subagents not read
+- agent ID message should be different from task_summary
+- tool grouper ID computed from first tool call ID
+
+### Other
+
+- derive turn boundaries from top-level runs instead of container nodes
+- add demo gif
+- add version badges
+- update README about installer and new features
+
 ## [0.1.1](https://github.com/jasonchoimtt/agent-transcript/compare/v0.1.0...v0.1.1) - 2026-06-13
 
 ### Added
