@@ -96,8 +96,7 @@ template = "{{path|path}}"
 [[transforms.tool_formatter.default_rules]]
 providers = ["cursor"]
 tools = ["Shell"]
-template = "{{command}}"
-expanded = true
+template = "{{description}}"
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["cursor"]
@@ -137,8 +136,7 @@ expanded = true
 [[transforms.tool_formatter.default_rules]]
 providers = ["claude"]
 tools = ["Bash"]
-template = "{{command}}"
-expanded = true
+template = "{{description}}"
 
 [[transforms.tool_formatter.default_rules]]
 providers = ["claude"]
