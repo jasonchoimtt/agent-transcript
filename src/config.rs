@@ -140,6 +140,12 @@ pub struct ToolGrouperConfig {
     /// tool group rather than breaking the run.  They do not count toward `min_count`.
     #[serde(default = "ToolGrouperConfig::default_allow_thinking")]
     pub allow_thinking: bool,
+    /// When true, hidden messages (e.g. the total-tokens reminder attachment) that arrive
+    /// between tool calls are absorbed into the tool group rather than breaking the run.
+    /// They do not count toward `min_count`. Unlike `allow_thinking`, this is not a visual
+    /// preference — it only affects the relative position of an already-invisible node.
+    #[serde(default = "ToolGrouperConfig::default_allow_hidden")]
+    pub allow_hidden: bool,
 }
 
 impl Default for ToolGrouperConfig {
@@ -149,12 +155,17 @@ impl Default for ToolGrouperConfig {
             default_groups: vec![],
             disable_defaults: false,
             allow_thinking: true,
+            allow_hidden: true,
         }
     }
 }
 
 impl ToolGrouperConfig {
     fn default_allow_thinking() -> bool {
+        true
+    }
+
+    fn default_allow_hidden() -> bool {
         true
     }
 

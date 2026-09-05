@@ -4,7 +4,7 @@ use tracing::{debug, trace};
 use crate::config::{ToolGroup, ToolGrouperConfig};
 use crate::transforms::Transform;
 use crate::tree_operation::TreeOperation;
-use crate::tree_scroll_view::state::{MessageState, MessageType};
+use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
 /// Groups consecutive matching tool-call nodes into a Container node.
 ///
@@ -39,6 +39,18 @@ use crate::tree_scroll_view::state::{MessageState, MessageType};
 ///   - `None` — error-aware: `true` if any child tool-call carries an `"error"` tag,
 ///     `false` otherwise.
 ///
+/// # Aside handling
+///
+/// Two message kinds are treated as "asides" rather than run-breaking ops: visible
+/// Thinking (gated by `allow_thinking`) and hidden nodes of any type (gated by
+/// `allow_hidden`, e.g. the total-tokens-reminder attachment — hidden by
+/// `UiInitializer`, which always runs before this transform). An aside is emitted
+/// immediately in its current position and buffered; a subsequent matching tool call
+/// pulls it into the container (Remove + re-Append), while a sealing op leaves it where
+/// it is. Either flag can be disabled to make that aside type run-breaking again — for
+/// `allow_hidden`, since the node is invisible either way, this only changes whether its
+/// position gets pulled inside a forming/growing container.
+///
 /// # Tag propagation
 ///
 /// `container_tag` inspects the ToolCall children and assigns a tag to the container:
@@ -59,6 +71,7 @@ pub struct ToolGrouper {
     /// All tool call IDs ever emitted; used to detect sub-agent tool calls.
     known_tool_ids: HashSet<String>,
     allow_thinking: bool,
+    allow_hidden: bool,
     /// Sealed containers for Remove propagation: container_id → child_ids.
     committed_groups: HashMap<String, HashSet<String>>,
 }
@@ -80,11 +93,12 @@ enum ActiveRun {
         /// Children in insertion order — needed to reconstruct the sealed Replace.
         children: Vec<MessageState>,
         child_ids: HashSet<String>,
-        /// Thinking messages emitted (under the container's parent) since the last
+        /// "Aside" messages — visible Thinking (when `allow_thinking`) or hidden nodes
+        /// (when `allow_hidden`) — emitted (under the container's parent) since the last
         /// tool call.  If a subsequent matching tool call arrives they are Remove'd
         /// and re-Append'd inside the container; if the container seals first they
         /// stay where they are.
-        thinking_buffer: Vec<(String, MessageState)>,
+        aside_buffer: Vec<(String, MessageState)>,
     },
 }
 
@@ -93,9 +107,29 @@ impl ToolGrouper {
         Self {
             groups: config.effective_groups(),
             allow_thinking: config.allow_thinking,
+            allow_hidden: config.allow_hidden,
             active: HashMap::new(),
             known_tool_ids: HashSet::new(),
             committed_groups: HashMap::new(),
+        }
+    }
+
+    /// Returns true if `msg` is an "aside" — a node that must never break or count toward
+    /// an active tool-call run, but should still be relocated into the container (or left
+    /// in place) so its relative position is preserved. Covers visible Thinking (gated by
+    /// `allow_thinking`, a visual preference) and hidden nodes of any type (gated by
+    /// `allow_hidden`, which only affects the position of an already-invisible node).
+    fn is_asidable(&self, msg: &MessageState) -> bool {
+        (self.allow_thinking && msg.message_type == MessageType::Thinking)
+            || (self.allow_hidden && msg.hidden == HiddenState::Hidden)
+    }
+
+    /// Returns `Some(message)` if `op` is an Append of an asidable message (see
+    /// `is_asidable`).
+    fn asidable_append<'a>(&self, op: &'a TreeOperation) -> Option<&'a MessageState> {
+        match op {
+            TreeOperation::Append { message, .. } if self.is_asidable(message) => Some(message),
+            _ => None,
         }
     }
 
@@ -119,9 +153,10 @@ impl ToolGrouper {
 
     /// Returns `(group_idx, suffix_len)` for the longest suffix of `buffer` whose items
     /// all match a single configured group, provided that length ≥ `min_count`.
-    /// When `allow_thinking` is set, Thinking messages within the suffix are skipped
-    /// (they do not count toward `min_count`).  The returned suffix is also trimmed of
-    /// any leading Thinking messages so the container never starts with a thinking node.
+    /// Aside messages (visible Thinking when `allow_thinking`, hidden nodes when
+    /// `allow_hidden`) within the suffix are skipped (they do not count toward
+    /// `min_count`).  The returned suffix is also trimmed of any leading aside messages
+    /// so the container never starts with a non-tool-call node.
     /// Returns `None` if no group's threshold is met.
     fn find_group_for_suffix(&self, buffer: &[(String, MessageState)]) -> Option<(usize, usize)> {
         let mut best: Option<(usize, usize)> = None;
@@ -129,12 +164,16 @@ impl ToolGrouper {
             let mut tool_count = 0usize;
             let mut raw_len = 0usize;
             for (_, msg) in buffer.iter().rev() {
-                if msg.message_type == MessageType::Thinking {
-                    if self.allow_thinking {
-                        raw_len += 1;
-                    } else {
-                        break;
-                    }
+                // A disallowed aside type ends the suffix outright, rather than falling
+                // through to a (potentially spurious) tool-name match on its text.
+                if msg.message_type == MessageType::Thinking && !self.allow_thinking {
+                    break;
+                }
+                if msg.hidden == HiddenState::Hidden && !self.allow_hidden {
+                    break;
+                }
+                if self.is_asidable(msg) {
+                    raw_len += 1;
                 } else if group_matches(group, extract_tool_name(&msg.text)) {
                     tool_count += 1;
                     raw_len += 1;
@@ -145,11 +184,11 @@ impl ToolGrouper {
             if tool_count < group.min_count {
                 continue;
             }
-            // Trim any leading Thinking items: the container must not start with a thinking.
+            // Trim any leading aside items: the container must not start with one.
             let run_start = buffer.len() - raw_len;
             let leading = buffer[run_start..]
                 .iter()
-                .take_while(|(_, m)| m.message_type == MessageType::Thinking)
+                .take_while(|(_, m)| self.is_asidable(m))
                 .count();
             let suffix_len = raw_len - leading;
             if suffix_len > 0 && best.is_none_or(|(_, bk)| suffix_len > bk) {
@@ -281,11 +320,11 @@ impl ToolGrouper {
                 ActiveRun::Collecting { buffer, .. } => buffer.iter().any(|(bid, _)| bid == &id),
                 ActiveRun::Grouped {
                     child_ids,
-                    thinking_buffer,
+                    aside_buffer,
                     container_id,
                     ..
                 } => {
-                    thinking_buffer.iter().any(|(tid, _)| tid == &id)
+                    aside_buffer.iter().any(|(tid, _)| tid == &id)
                         || child_ids.contains(&id)
                         || container_id == &id
                 }
@@ -320,11 +359,11 @@ impl ToolGrouper {
                     container_id,
                     mut children,
                     mut child_ids,
-                    mut thinking_buffer,
+                    mut aside_buffer,
                 } => {
-                    if let Some(pos) = thinking_buffer.iter().position(|(tid, _)| tid == &id) {
-                        trace!("Remove({id}): evicted from thinking_buffer of state {state_id}");
-                        thinking_buffer.remove(pos);
+                    if let Some(pos) = aside_buffer.iter().position(|(tid, _)| tid == &id) {
+                        trace!("Remove({id}): evicted from aside_buffer of state {state_id}");
+                        aside_buffer.remove(pos);
                         output.push(TreeOperation::Remove { id });
                         self.active.insert(
                             state_id,
@@ -334,7 +373,7 @@ impl ToolGrouper {
                                 container_id,
                                 children,
                                 child_ids,
-                                thinking_buffer,
+                                aside_buffer,
                             },
                         );
                     } else if child_ids.remove(&id) {
@@ -360,7 +399,7 @@ impl ToolGrouper {
                                     container_id,
                                     children,
                                     child_ids,
-                                    thinking_buffer,
+                                    aside_buffer,
                                 },
                             );
                         }
@@ -455,13 +494,13 @@ impl ToolGrouper {
                 parent_id: cur_parent,
                 mut buffer,
             } => {
-                // Thinking with a non-empty buffer: emit immediately (visible in tree) and
-                // add to the buffer so it's included if/when the container forms.
-                // Thinking with an empty buffer: pass through (a run cannot start with a thinking).
-                if self.allow_thinking && is_thinking_append(&op) {
+                // Aside with a non-empty buffer: emit immediately (in its current position)
+                // and add to the buffer so it's included if/when the container forms.
+                // Aside with an empty buffer: pass through (a run cannot start with an aside).
+                if self.asidable_append(&op).is_some() {
                     if buffer.is_empty() {
                         trace!(
-                            "Collecting(idle) [state={state_id}]: thinking passes through (no active run)"
+                            "Collecting(idle) [state={state_id}]: aside passes through (no active run)"
                         );
                         output.push(op);
                         // State stays idle, don't insert.
@@ -475,7 +514,7 @@ impl ToolGrouper {
                         };
                         let id = message.id.clone();
                         trace!(
-                            "Collecting [state={state_id}]: thinking {id} emitted and buffered (buffer_len={})",
+                            "Collecting [state={state_id}]: aside {id} emitted and buffered (buffer_len={})",
                             buffer.len() + 1
                         );
                         output.push(TreeOperation::Append {
@@ -534,7 +573,7 @@ impl ToolGrouper {
                                     container_id,
                                     children,
                                     child_ids,
-                                    thinking_buffer: vec![],
+                                    aside_buffer: vec![],
                                 },
                             );
                         } else {
@@ -652,13 +691,13 @@ impl ToolGrouper {
                 container_id,
                 mut children,
                 mut child_ids,
-                mut thinking_buffer,
+                mut aside_buffer,
             } => {
-                // Thinking arrives while grouped: emit it immediately so it stays visible,
-                // but track it in thinking_buffer.  If a subsequent matching tool call
-                // arrives the thinking is Removed and re-Appended inside the container;
+                // Aside arrives while grouped: emit it immediately in its current position,
+                // but track it in aside_buffer.  If a subsequent matching tool call
+                // arrives the aside is Removed and re-Appended inside the container;
                 // if the container seals it stays in the tree under the container's parent.
-                if self.allow_thinking && is_thinking_append(&op) {
+                if self.asidable_append(&op).is_some() {
                     let TreeOperation::Append {
                         parent_id: op_parent,
                         message,
@@ -668,14 +707,14 @@ impl ToolGrouper {
                     };
                     let id = message.id.clone();
                     trace!(
-                        "Grouped [state={state_id}]: thinking {id} emitted under container parent, held in thinking_buffer (len={})",
-                        thinking_buffer.len() + 1
+                        "Grouped [state={state_id}]: aside {id} emitted under container parent, held in aside_buffer (len={})",
+                        aside_buffer.len() + 1
                     );
                     output.push(TreeOperation::Append {
                         parent_id: op_parent,
                         message: message.clone(),
                     });
-                    thinking_buffer.push((id, message));
+                    aside_buffer.push((id, message));
                     self.active.insert(
                         state_id,
                         ActiveRun::Grouped {
@@ -684,7 +723,7 @@ impl ToolGrouper {
                             container_id,
                             children,
                             child_ids,
-                            thinking_buffer,
+                            aside_buffer,
                         },
                     );
                     return;
@@ -693,15 +732,15 @@ impl ToolGrouper {
                 match matched_group {
                     // Only extend the grouped run for the same group AND same parent.
                     Some((g, ref pid)) if g == group_idx && *pid == parent_id => {
-                        // Move pending thinking messages into the container:
+                        // Move pending aside messages into the container:
                         // Remove from their current position, re-Append under the container.
-                        let pending_thinking = thinking_buffer.len();
-                        if pending_thinking > 0 {
+                        let pending_asides = aside_buffer.len();
+                        if pending_asides > 0 {
                             trace!(
-                                "Grouped [state={state_id}]: moving {pending_thinking} thinking node(s) into container {container_id}"
+                                "Grouped [state={state_id}]: moving {pending_asides} aside node(s) into container {container_id}"
                             );
                         }
-                        for (tid, tmsg) in std::mem::take(&mut thinking_buffer) {
+                        for (tid, tmsg) in std::mem::take(&mut aside_buffer) {
                             output.push(TreeOperation::Remove { id: tid.clone() });
                             output.push(TreeOperation::Append {
                                 parent_id: Some(container_id.clone()),
@@ -742,7 +781,7 @@ impl ToolGrouper {
                                 container_id,
                                 children,
                                 child_ids,
-                                thinking_buffer,
+                                aside_buffer,
                             },
                         );
                     }
@@ -817,11 +856,11 @@ impl ToolGrouper {
                                     container_id,
                                     children,
                                     child_ids,
-                                    thinking_buffer,
+                                    aside_buffer,
                                 },
                             );
                         } else {
-                            // Non-matching: thinking_buffer items are already in the tree
+                            // Non-matching: aside_buffer items are already in the tree
                             // under the container's parent — nothing extra to emit.
                             let group_name = &self.groups[group_idx].name;
                             debug!(
@@ -1168,10 +1207,6 @@ fn active_state_name(active: &ActiveRun) -> &'static str {
         ActiveRun::Collecting { .. } => "Collecting",
         ActiveRun::Grouped { .. } => "Grouped",
     }
-}
-
-fn is_thinking_append(op: &TreeOperation) -> bool {
-    matches!(op, TreeOperation::Append { message, .. } if message.message_type == MessageType::Thinking)
 }
 
 fn extract_tool_name(text: &Option<String>) -> &str {
@@ -1856,7 +1891,7 @@ mod tests {
     #[test]
     fn thinking_in_grouped_held_until_next_tool() {
         // In Grouped state a thinking is emitted immediately but tracked in
-        // thinking_buffer.  When the next matching tool arrives the thinking is
+        // aside_buffer.  When the next matching tool arrives the thinking is
         // Remove'd from its original position and re-Append'd inside the container.
         let mut grouper = ToolGrouper::new(config_catchall_min3());
         let b1 = grouper.process(vec![
@@ -1959,6 +1994,161 @@ mod tests {
         assert!(!out.iter().any(|op| is_remove_id(op, "t1")));
         assert!(!out.iter().any(|op| is_remove_id(op, "t2")));
         // t3 becomes the container.
+        assert!(
+            out.iter().any(|op| is_replace_from(op, "t3")),
+            "t3,t4,t5 should form a container"
+        );
+    }
+
+    // ── allow_hidden ────────────────────────────────────────────────────────
+
+    fn hidden_op(id: &str) -> TreeOperation {
+        TreeOperation::Append {
+            parent_id: None,
+            message: MessageState::new(id)
+                .message_type(MessageType::UserMessage)
+                .tag("attachment")
+                .hidden(HiddenState::Hidden),
+        }
+    }
+
+    fn config_catchall_min3_no_hidden() -> ToolGrouperConfig {
+        ToolGrouperConfig {
+            groups: vec![crate::config::ToolGroup {
+                name: "Tool calls".to_string(),
+                tools: vec!["*".to_string()],
+                min_count: 3,
+                expanded: Some(false),
+                shorten_as_glob: false,
+            }],
+            allow_hidden: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hidden_alone_does_not_start_run() {
+        // A hidden op with an empty buffer passes through and does not start a run.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+        let out = grouper.process(vec![hidden_op("h1"), tool_op("t1", "read")]);
+        assert!(is_append_id(&out[0], "h1"));
+        assert!(is_append_id(&out[1], "t1"));
+        assert!(
+            !out.iter()
+                .any(|op| matches!(op, TreeOperation::Replace { .. }))
+        );
+    }
+
+    #[test]
+    fn hidden_between_tools_included_in_container() {
+        // A hidden node that arrives between tool calls is emitted (preserving its
+        // position), added to the buffer, and pulled into the container once min_count
+        // is reached — same treatment as a Thinking aside.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+        let batch = grouper.process(vec![
+            tool_op("t1", "read"),
+            hidden_op("h1"),
+            tool_op("t2", "write"),
+            tool_op("t3", "exec"),
+        ]);
+        assert!(is_append_id(&batch[0], "t1"));
+        assert!(is_append_id(&batch[1], "h1"));
+        assert!(is_append_id(&batch[2], "t2"));
+        assert!(is_append_id(&batch[3], "t3"));
+        assert!(batch.iter().any(|op| is_remove_id(op, "h1")));
+        assert!(batch.iter().any(|op| is_remove_id(op, "t2")));
+        assert!(batch.iter().any(|op| is_remove_id(op, "t3")));
+        let replace = batch
+            .iter()
+            .find(|op| is_replace_from(op, "t1"))
+            .expect("Replace(t1→Container) missing");
+        // Label counts only tool calls (3, not 4) — h1 doesn't count toward min_count.
+        if let TreeOperation::Replace { message, .. } = replace {
+            let text = message.text.as_deref().unwrap_or("");
+            assert!(
+                text.contains("3 tool calls"),
+                "label should count 3 tool calls: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_in_grouped_held_until_next_tool() {
+        // In Grouped state a hidden node is emitted immediately (preserving position)
+        // but tracked in aside_buffer; the next matching tool pulls it into the container.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+        let b1 = grouper.process(vec![
+            tool_op("t1", "read"),
+            tool_op("t2", "write"),
+            tool_op("t3", "exec"),
+        ]);
+        let cid = b1
+            .iter()
+            .find(|op| is_replace_from(op, "t1"))
+            .and_then(container_id_from_replace)
+            .expect("container missing");
+
+        let b2 = grouper.process(vec![hidden_op("h1")]);
+        assert_eq!(b2.len(), 1, "hidden node should be emitted immediately");
+        assert!(is_append_id(&b2[0], "h1"));
+        assert!(
+            !matches!(&b2[0], TreeOperation::Append { parent_id: Some(pid), .. } if pid == &cid),
+            "h1 should NOT be appended inside the container yet"
+        );
+
+        let b3 = grouper.process(vec![tool_op("t4", "read")]);
+        assert!(
+            is_remove_id(&b3[0], "h1"),
+            "h1 must be removed from its original position"
+        );
+        assert!(
+            is_append_to_parent(&b3[1], "h1", &cid),
+            "h1 should be re-appended inside the container, preserving its relative position"
+        );
+        assert!(is_append_to_parent(&b3[2], "t4", &cid));
+        assert!(is_replace_from(&b3[3], &cid));
+    }
+
+    #[test]
+    fn hidden_in_grouped_stays_under_parent_on_seal() {
+        // When the container seals before another matching tool arrives, a hidden node
+        // that was emitted under the container's parent just stays there.
+        let mut grouper = ToolGrouper::new(config_catchall_min3());
+        let b1 = grouper.process(vec![
+            tool_op("t1", "read"),
+            tool_op("t2", "write"),
+            tool_op("t3", "exec"),
+        ]);
+        let cid = b1
+            .iter()
+            .find(|op| is_replace_from(op, "t1"))
+            .and_then(container_id_from_replace)
+            .expect("container missing");
+
+        let b_hidden = grouper.process(vec![hidden_op("h1")]);
+        assert!(b_hidden.iter().any(|op| is_append_id(op, "h1")));
+
+        let b2 = grouper.process(vec![user_op("u1")]);
+        assert!(b2.iter().any(|op| is_replace_from(op, &cid)));
+        assert!(!b2.iter().any(|op| is_append_id(op, "h1")));
+        assert!(!b2.iter().any(|op| is_remove_id(op, "h1")));
+    }
+
+    #[test]
+    fn allow_hidden_false_hidden_breaks_run() {
+        // With allow_hidden disabled, a hidden op breaks the collecting run just like
+        // any other non-matching op.
+        let mut grouper = ToolGrouper::new(config_catchall_min3_no_hidden());
+        let out = grouper.process(vec![
+            tool_op("t1", "read"),
+            tool_op("t2", "write"),
+            hidden_op("h1"),
+            tool_op("t3", "exec"),
+            tool_op("t4", "list"),
+            tool_op("t5", "grep"),
+        ]);
+        assert!(!out.iter().any(|op| is_remove_id(op, "t1")));
+        assert!(!out.iter().any(|op| is_remove_id(op, "t2")));
         assert!(
             out.iter().any(|op| is_replace_from(op, "t3")),
             "t3,t4,t5 should form a container"
