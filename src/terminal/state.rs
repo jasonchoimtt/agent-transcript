@@ -450,6 +450,10 @@ impl TerminalState {
         });
     }
 
+    /// PID of the directly-spawned child process (the CLI binary itself, not
+    /// any of its descendants). Used both for suspend/resume signalling and
+    /// to distinguish the tracked CLI's own `SessionStart` hooks from ones
+    /// fired by a nested sub-agent invocation.
     pub(crate) fn child_pid(&self) -> Option<libc::pid_t> {
         self.child
             .lock()

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::event::Event;
 use crate::plugin_install::extract_plugin;
 use crate::providers::ProviderKind;
-use crate::session_socket::SessionSocket;
+use crate::session_socket::{ExpectedCli, SessionSocket};
 use crate::terminal::pane_ref::{PlaceholderInfo, PlaceholderStatus, TerminalPaneRef};
 use crate::terminal::state::TerminalState;
 
@@ -197,7 +197,19 @@ impl TerminalPanel {
         let mut ts =
             TerminalState::new_with_cmd(cmd, cwd, crop_detector, sender.clone(), terminal_id)?;
         ts.crop_min_height = 7;
-        socket.spawn_accept_task(sender);
+        // Gate the socket to hook messages whose invoking CLI process is this
+        // directly-spawned child, so a nested sub-agent (e.g. `claude -p`, which
+        // inherits AGT_SOCKET and fires its own SessionStart hook) can't hijack
+        // the followed session.
+        let binary_name = std::path::Path::new(&info.binary)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| info.binary.clone());
+        let expected_cli = ts.child_pid().map(|pid| ExpectedCli {
+            pid: pid as u32,
+            binary: binary_name,
+        });
+        socket.spawn_accept_task(sender, expected_cli);
 
         Ok(PanelState::Live {
             info: info.clone(),
