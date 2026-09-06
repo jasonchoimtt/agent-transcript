@@ -350,7 +350,53 @@ mod tests {
         mpsc::unbounded_channel().0
     }
 
-    fn sh_live_panel() -> TerminalPanel {
+    /// Wraps a `TerminalPanel` spawned with a real child process. Captures the
+    /// child's PID up front and force-resumes + kills it on drop, so a test
+    /// that suspends the child, panics on an assertion, or calls
+    /// `transition_to_exited()` (which drops the `TerminalState` without ever
+    /// signalling the child) can never leak a running or permanently-stopped
+    /// orphan process.
+    struct GuardedPanel {
+        panel: TerminalPanel,
+        child_pid: libc::pid_t,
+    }
+
+    impl std::ops::Deref for GuardedPanel {
+        type Target = TerminalPanel;
+        fn deref(&self) -> &TerminalPanel {
+            &self.panel
+        }
+    }
+
+    impl std::ops::DerefMut for GuardedPanel {
+        fn deref_mut(&mut self) -> &mut TerminalPanel {
+            &mut self.panel
+        }
+    }
+
+    impl Drop for GuardedPanel {
+        fn drop(&mut self) {
+            unsafe {
+                // SIGCONT first: a stopped process still dies from SIGKILL, but
+                // continuing it too means it isn't left in a confusing stopped
+                // state if something inspects it before the kill is processed.
+                libc::kill(self.child_pid, libc::SIGCONT);
+                libc::kill(self.child_pid, libc::SIGKILL);
+            }
+        }
+    }
+
+    fn guard(panel: TerminalPanel) -> GuardedPanel {
+        let child_pid = match &panel.state {
+            PanelState::Live { ts, .. } | PanelState::Suspended { ts, .. } => {
+                ts.child_pid().expect("spawned child must have a pid")
+            }
+            _ => panic!("guard() requires a panel with a live child"),
+        };
+        GuardedPanel { panel, child_pid }
+    }
+
+    fn sh_live_panel() -> GuardedPanel {
         let info = SessionInfo {
             provider: ProviderKind::Claude,
             session_id: Some("test-sess".to_string()),
@@ -368,20 +414,20 @@ mod tests {
         )
         .expect("sh must be available");
         let socket = SessionSocket::new().expect("socket creation must succeed");
-        TerminalPanel {
+        guard(TerminalPanel {
             state: PanelState::Live {
                 info,
                 ts: Box::new(ts),
                 socket,
             },
             expanded: false,
-        }
+        })
     }
 
     /// Like `sh_live_panel`, but spawns a plain `sleep` instead of a shell,
     /// to verify actual OS-level signal delivery without a shell's own job
     /// control getting in the way.
-    fn sleep_live_panel() -> TerminalPanel {
+    fn sleep_live_panel() -> GuardedPanel {
         let info = SessionInfo {
             provider: ProviderKind::Claude,
             session_id: Some("test-sess".to_string()),
@@ -395,14 +441,14 @@ mod tests {
         let ts = TerminalState::new_with_cmd(cmd, None, Box::new(NullCropDetector), sh_sender(), 0)
             .expect("sleep must be available");
         let socket = SessionSocket::new().expect("socket creation must succeed");
-        TerminalPanel {
+        guard(TerminalPanel {
             state: PanelState::Live {
                 info,
                 ts: Box::new(ts),
                 socket,
             },
             expanded: false,
-        }
+        })
     }
 
     /// Poll `/proc/<pid>/stat` for the given state char (e.g. `T` = stopped,
@@ -463,8 +509,7 @@ mod tests {
             wait_for_proc_state(pid, 'T'),
             "child did not reach stopped state after suspend()"
         );
-        // Clean up: bring it back so drop doesn't leave a stopped process behind.
-        panel.resume_suspended();
+        // GuardedPanel's drop forces resume + kill, so no manual cleanup needed here.
     }
 
     #[test]
