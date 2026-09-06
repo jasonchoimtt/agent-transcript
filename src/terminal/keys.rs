@@ -34,6 +34,7 @@ pub fn key_event_to_bytes(
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab if alt => Some(b"\x1b\t".to_vec()),
         KeyCode::Tab => Some(vec![b'\t']),
+        KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
         KeyCode::Up if alt => Some(b"\x1b[1;3A".to_vec()),
         KeyCode::Up => Some(if application_cursor {
@@ -174,6 +175,11 @@ mod tests {
     #[test]
     fn tab() {
         assert_eq!(encode(press(KeyCode::Tab)).unwrap(), b"\t");
+    }
+
+    #[test]
+    fn shift_tab() {
+        assert_eq!(encode(press(KeyCode::BackTab)).unwrap(), b"\x1b[Z");
     }
 
     #[test]
