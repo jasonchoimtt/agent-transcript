@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Clear, StatefulWidget, Widget};
 
 use super::state::DataViewState;
-use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
+use crate::terminal::pane_ref::{PlaceholderInfo, PlaceholderStatus, TerminalPaneRef};
 use crate::theme::Theme;
 use crate::tree_scroll_view::TreeScrollView;
 
@@ -34,7 +34,7 @@ impl StatefulWidget for DataViewUi<'_> {
                 provider_name: "",
                 session_id: None,
                 directory: None,
-                exit_code: None,
+                status: PlaceholderStatus::NotStarted,
             }),
             scrollback_available: 0,
             terminal_expanded: false,

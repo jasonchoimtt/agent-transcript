@@ -235,7 +235,9 @@ impl App {
     /// Return the provider + session ID of the active session, if known.
     fn resume_info(&self) -> Option<(ProviderKind, String)> {
         match &self.terminal.state {
-            PanelState::Live { info, .. } | PanelState::Exited { info, .. } => {
+            PanelState::Live { info, .. }
+            | PanelState::Suspended { info, .. }
+            | PanelState::Exited { info, .. } => {
                 let id = info.session_id.clone()?;
                 Some((info.provider.clone(), id))
             }
@@ -427,7 +429,9 @@ impl App {
             return;
         }
         info!(code = ?code, "terminal exited");
-        if self.terminal.is_live() {
+        // is_suspended() covers a suspended child killed directly (e.g. via
+        // Ctrl-K), whose PTY EOF still surfaces as a TerminalExited event.
+        if self.terminal.is_live() || self.terminal.is_suspended() {
             self.terminal.transition_to_exited(code);
             if self.mode == AppMode::Terminal {
                 self.set_mode(AppMode::Normal);
@@ -1004,5 +1008,26 @@ mod tests {
         app.apply_terminal_exited(0, Some(0));
 
         assert!(!app.running);
+    }
+
+    // ── Quit refused while agent is suspended ────────────────────────────
+
+    #[tokio::test]
+    async fn quit_refused_while_suspended() {
+        use crate::tree_scroll_view::TreeAction;
+
+        let mut app = picker_app().await;
+        app.terminal = sh_live_panel(&app);
+        app.terminal.suspend();
+        assert!(app.terminal.is_suspended());
+
+        app.apply_tree_action(TreeAction::Quit);
+
+        assert!(app.running, "quit must be refused while suspended");
+        assert!(app.terminal.is_suspended(), "child must not be killed");
+        assert!(
+            app.flash_message.is_some(),
+            "a warning flash should explain why quit was refused"
+        );
     }
 }

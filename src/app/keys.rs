@@ -168,18 +168,18 @@ impl App {
                 };
                 match kind {
                     ConfirmKind::Kill => {
-                        if let Some(ts) = self.terminal.live_ts() {
+                        if let Some(ts) = self.terminal.running_ts() {
                             ts.kill();
                         }
                     }
                     ConfirmKind::SessionSwitch(entry) => {
-                        if let Some(ts) = self.terminal.live_ts() {
+                        if let Some(ts) = self.terminal.running_ts() {
                             ts.kill();
                         }
                         self.do_session_switch(entry).await;
                     }
                     ConfirmKind::SessionSwitchAndResume(entry) => {
-                        if let Some(ts) = self.terminal.live_ts() {
+                        if let Some(ts) = self.terminal.running_ts() {
                             ts.kill();
                         }
                         self.do_session_switch(entry).await;
@@ -187,7 +187,7 @@ impl App {
                         self.activate_terminal();
                     }
                     ConfirmKind::NewSession(provider) => {
-                        if let Some(ts) = self.terminal.live_ts() {
+                        if let Some(ts) = self.terminal.running_ts() {
                             ts.kill();
                         }
                         self.do_new_session(provider);
@@ -283,6 +283,19 @@ impl App {
             // Ctrl-O: deactivate terminal, also clear quit intent.
             self.set_mode(AppMode::Normal);
             self.quit_intent = false;
+        } else if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('z')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            // Ctrl-Z: suspend the agent process directly (SIGSTOP) rather than
+            // forwarding the raw byte through the PTY, and fall back to Normal
+            // mode — mirroring how apply_terminal_exited handles Live -> Exited.
+            // SIGSTOP (not SIGTSTP) because the child runs in its own setsid()
+            // session with no controlling terminal, making its process group
+            // orphaned; the kernel silently discards SIGTSTP sent to an
+            // orphaned process group, but SIGSTOP is unconditional.
+            self.terminal.suspend();
+            self.set_mode(AppMode::Normal);
         } else if let Some(term) = self.terminal.live_ts() {
             let app_cursor = term.parser.screen().application_cursor();
             let app_keypad = term.parser.screen().application_keypad();
@@ -364,11 +377,17 @@ impl App {
             && key.code == KeyCode::Char('y')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            // Ctrl-Y: launch terminal; push jump if not already at bottom.
+            // Ctrl-Y: resume a suspended agent, or launch/relaunch the terminal;
+            // push jump if not already at bottom.
             if !self.tree_state.at_bottom {
                 self.tree_state.push_jump();
             }
-            self.try_launch_deferred_terminal();
+            if self.terminal.is_suspended() {
+                self.terminal.resume_suspended();
+                self.activate_terminal();
+            } else {
+                self.try_launch_deferred_terminal();
+            }
         } else if key.kind == KeyEventKind::Press
             && key.code == KeyCode::Char('m')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -433,8 +452,8 @@ impl App {
             && key.code == KeyCode::Char('k')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            // Ctrl-K: kill confirmation (only when live).
-            if self.terminal.is_live() {
+            // Ctrl-K: kill confirmation (when a child process exists, live or suspended).
+            if self.terminal.has_child() {
                 self.set_mode(AppMode::Confirm(ConfirmKind::Kill));
             }
         } else {
@@ -458,6 +477,15 @@ impl App {
                         _ => " Ctrl-D twice to exit",
                     };
                     self.flash_message = Some((hint.to_string(), false, std::time::Instant::now()));
+                } else if self.terminal.is_suspended() {
+                    // Refuse to quit out from under a suspended agent: killing it
+                    // silently would lose unsaved state the user can't see. Make
+                    // them resume (Ctrl-Y) and exit the agent themselves first.
+                    self.flash_message = Some((
+                        "Agent is suspended — resume with Ctrl-Y before quitting".to_string(),
+                        true,
+                        std::time::Instant::now(),
+                    ));
                 } else {
                     self.running = false;
                 }

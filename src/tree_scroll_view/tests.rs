@@ -6,7 +6,7 @@ use super::state::{
 };
 use super::ui::TreeScrollView;
 use crate::reader_op::ReaderOp;
-use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
+use crate::terminal::pane_ref::{PlaceholderInfo, PlaceholderStatus, TerminalPaneRef};
 use crate::theme::Theme;
 use crate::tree_operation::TreeOperation;
 
@@ -50,7 +50,7 @@ fn render_once(state: &mut TreeScrollViewState, width: u16, height: u16) {
                     provider_name: "",
                     session_id: None,
                     directory: None,
-                    exit_code: None,
+                    status: PlaceholderStatus::NotStarted,
                 }),
                 scrollback_available: 0,
                 terminal_expanded: false,
@@ -1105,7 +1105,11 @@ fn select_next_type_start_advances_across_type_boundary() {
     state.selection_index = vec![0]; // user:0 (UserMessage)
 
     state.select_next_type_start(); // → agent:0a
-    assert_eq!(sel(&state), vec![1], "should advance to first AgentMessage run");
+    assert_eq!(
+        sel(&state),
+        vec![1],
+        "should advance to first AgentMessage run"
+    );
 }
 
 #[test]
@@ -1114,7 +1118,11 @@ fn select_next_type_start_skips_run() {
     state.selection_index = vec![1]; // agent:0a (first of AgentMessage run)
 
     state.select_next_type_start(); // → ToolCall (different type after AgentMessage run)
-    assert_eq!(sel(&state), vec![3], "should skip AgentMessage run to ToolCall");
+    assert_eq!(
+        sel(&state),
+        vec![3],
+        "should skip AgentMessage run to ToolCall"
+    );
 }
 
 #[test]
@@ -1123,7 +1131,11 @@ fn select_next_type_start_clamps_at_last_run() {
     state.selection_index = vec![8]; // agent:2 (last non-terminal node)
 
     state.select_next_type_start(); // nothing after
-    assert_eq!(sel(&state), vec![8], "should stay at last node when no next run");
+    assert_eq!(
+        sel(&state),
+        vec![8],
+        "should stay at last node when no next run"
+    );
 }
 
 #[test]
@@ -1306,7 +1318,11 @@ fn summary_tree() -> TreeScrollViewState {
         node("user:0", MessageType::UserMessage, "u0"),
         node("agent:intro", MessageType::AgentMessage, "on it"),
         node("tool:0", MessageType::ToolCall, "bash"),
-        node("agent:sum0", MessageType::AgentMessage, "here is what I found"),
+        node(
+            "agent:sum0",
+            MessageType::AgentMessage,
+            "here is what I found",
+        ),
         node("table:0", MessageType::Table, "| a | b |"),
         node("user:1", MessageType::UserMessage, "u1"),
         node("tool:1", MessageType::ToolCall, "bash"),
@@ -1444,7 +1460,11 @@ fn turn_nav_clamps_at_boundaries() {
     // [] from the first summary: nothing before it.
     state.selection_index = vec![1];
     state.select_prev_turn_end();
-    assert_eq!(sel(&state), vec![1], "prev turn end clamps at first summary");
+    assert_eq!(
+        sel(&state),
+        vec![1],
+        "prev turn end clamps at first summary"
+    );
 
     // ][ from the last summary — no summary after it.
     state.selection_index = vec![8];

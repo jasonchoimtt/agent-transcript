@@ -12,7 +12,7 @@ mod tests;
 pub mod ui;
 
 pub use crop::{CollapsedCrop, CropDetector, NullCropDetector};
-pub use pane_ref::{PlaceholderInfo, TerminalPaneRef};
+pub use pane_ref::{PlaceholderInfo, PlaceholderStatus, TerminalPaneRef};
 pub use panel::{PanelState, SessionInfo, TerminalPanel};
 pub use placeholder::PlaceholderWidget;
 pub use state::TerminalState;

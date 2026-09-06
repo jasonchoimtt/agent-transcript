@@ -2,7 +2,13 @@ use crate::tree_scroll_view::{MessageState, MessageType};
 
 pub fn build_key_shortcuts_nodes() -> Vec<MessageState> {
     let categories: &[(&str, &[(&str, &str)])] = &[
-        ("In-chat", &[("Ctrl-O", "Exit chat mode")]),
+        (
+            "In-chat",
+            &[
+                ("Ctrl-O", "Exit chat mode"),
+                ("Ctrl-Z", "Suspend agent process"),
+            ],
+        ),
         (
             "Chat session",
             &[

@@ -5,7 +5,7 @@ use ratatui::{
     widgets::Widget,
 };
 
-use super::pane_ref::PlaceholderInfo;
+use super::pane_ref::{PlaceholderInfo, PlaceholderStatus};
 
 pub struct PlaceholderWidget<'a> {
     pub info: &'a PlaceholderInfo,
@@ -62,14 +62,21 @@ impl Widget for PlaceholderWidget<'_> {
             String::new(),
         ];
 
-        if let Some(code) = self.info.exit_code {
-            let code_str = if code >= 0 {
-                format!("{code}")
-            } else {
-                "unknown".to_string()
-            };
-            lines.push(format!("Command exited with code {code_str}"));
-            lines.push(String::new());
+        match self.info.status {
+            PlaceholderStatus::Exited(code) => {
+                let code_str = if code >= 0 {
+                    format!("{code}")
+                } else {
+                    "unknown".to_string()
+                };
+                lines.push(format!("Command exited with code {code_str}"));
+                lines.push(String::new());
+            }
+            PlaceholderStatus::Suspended => {
+                lines.push("Agent suspended".to_string());
+                lines.push(String::new());
+            }
+            PlaceholderStatus::NotStarted => {}
         }
 
         lines.push("[Ctrl-Y] Resume session".to_string());

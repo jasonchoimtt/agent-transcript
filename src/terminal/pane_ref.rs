@@ -15,6 +15,15 @@ pub struct PlaceholderInfo {
     pub provider_name: &'static str,
     pub session_id: Option<String>,
     pub directory: Option<PathBuf>,
-    /// `Some` = terminal has exited (value is the exit code), `None` = not yet started.
-    pub exit_code: Option<i32>,
+    pub status: PlaceholderStatus,
+}
+
+/// Why the placeholder is showing instead of a live PTY.
+pub enum PlaceholderStatus {
+    /// Not yet launched.
+    NotStarted,
+    /// CLI process exited with the given code.
+    Exited(i32),
+    /// Child process is alive but SIGSTOP'd.
+    Suspended,
 }

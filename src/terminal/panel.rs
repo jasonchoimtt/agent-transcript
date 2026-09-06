@@ -7,7 +7,7 @@ use crate::event::Event;
 use crate::plugin_install::extract_plugin;
 use crate::providers::ProviderKind;
 use crate::session_socket::SessionSocket;
-use crate::terminal::pane_ref::{PlaceholderInfo, TerminalPaneRef};
+use crate::terminal::pane_ref::{PlaceholderInfo, PlaceholderStatus, TerminalPaneRef};
 use crate::terminal::state::TerminalState;
 
 /// Identity and working context for a terminal session.
@@ -41,6 +41,14 @@ pub enum PanelState {
         /// Dropped (and socket file unlinked) when transitioning to `Exited`.
         socket: SessionSocket,
     },
+    /// Child process is SIGSTOP'd; `ts`/`socket` are kept alive (not torn
+    /// down) so scrollback and the PTY handles survive the round-trip.
+    /// Ctrl-Y sends SIGCONT to the same child and returns to `Live`.
+    Suspended {
+        info: SessionInfo,
+        ts: Box<TerminalState>,
+        socket: SessionSocket,
+    },
     /// CLI exited; Ctrl-Y will spawn a new instance.
     Exited {
         code: Option<i32>,
@@ -65,6 +73,23 @@ impl TerminalPanel {
 
     pub fn is_live(&self) -> bool {
         matches!(self.state, PanelState::Live { .. })
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        matches!(self.state, PanelState::Suspended { .. })
+    }
+
+    /// True when a child process exists, whether running (`Live`) or
+    /// stopped (`Suspended`). Use this instead of `is_live()` for
+    /// process-lifecycle decisions (kill-before-switch, quit cleanup) so a
+    /// suspended child isn't silently leaked; use `is_live()` for
+    /// I/O-forwarding and rendering decisions, where `Suspended` should
+    /// behave like a placeholder rather than a live pane.
+    pub fn has_child(&self) -> bool {
+        matches!(
+            self.state,
+            PanelState::Live { .. } | PanelState::Suspended { .. }
+        )
     }
 
     pub fn sync_locked(&self) -> bool {
@@ -95,6 +120,16 @@ impl TerminalPanel {
         }
     }
 
+    /// Returns `&mut TerminalState` if a child process exists, whether
+    /// `Live` or `Suspended`. See `has_child()` for when to prefer this
+    /// over `live_ts()`.
+    pub fn running_ts(&mut self) -> Option<&mut TerminalState> {
+        match &mut self.state {
+            PanelState::Live { ts, .. } | PanelState::Suspended { ts, .. } => Some(ts),
+            _ => None,
+        }
+    }
+
     /// Builds a `TerminalPaneRef` for the tree scroll view renderer.
     /// Returns `Placeholder` with empty fields when state is `Absent`.
     pub fn pane_ref(&mut self) -> TerminalPaneRef<'_> {
@@ -104,19 +139,25 @@ impl TerminalPanel {
                 provider_name: info.provider.display_name(),
                 session_id: info.session_id.clone(),
                 directory: Some(info.directory.clone()),
-                exit_code: None,
+                status: PlaceholderStatus::NotStarted,
+            }),
+            PanelState::Suspended { info, .. } => TerminalPaneRef::Placeholder(PlaceholderInfo {
+                provider_name: info.provider.display_name(),
+                session_id: info.session_id.clone(),
+                directory: Some(info.directory.clone()),
+                status: PlaceholderStatus::Suspended,
             }),
             PanelState::Exited { code, info } => TerminalPaneRef::Placeholder(PlaceholderInfo {
                 provider_name: info.provider.display_name(),
                 session_id: info.session_id.clone(),
                 directory: Some(info.directory.clone()),
-                exit_code: Some(code.unwrap_or(-1)),
+                status: PlaceholderStatus::Exited(code.unwrap_or(-1)),
             }),
             PanelState::Absent => TerminalPaneRef::Placeholder(PlaceholderInfo {
                 provider_name: "",
                 session_id: None,
                 directory: None,
-                exit_code: None,
+                status: PlaceholderStatus::NotStarted,
             }),
         }
     }
@@ -176,11 +217,43 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// `Live → Exited`; no-op for other states. Display fields are preserved.
+    /// `Live/Suspended → Exited`; no-op for other states. Display fields are preserved.
     pub fn transition_to_exited(&mut self, code: Option<i32>) {
         let prev = std::mem::replace(&mut self.state, PanelState::Absent);
         self.state = match prev {
-            PanelState::Live { info, .. } => PanelState::Exited { code, info },
+            PanelState::Live { info, .. } | PanelState::Suspended { info, .. } => {
+                PanelState::Exited { code, info }
+            }
+            other => other,
+        };
+    }
+
+    /// `Live → Suspended`: sends SIGSTOP to the child and keeps its `ts`/`socket` alive.
+    /// No-op for other states.
+    pub fn suspend(&mut self) {
+        let prev = std::mem::replace(&mut self.state, PanelState::Absent);
+        self.state = match prev {
+            PanelState::Live { info, ts, socket } => {
+                ts.suspend();
+                PanelState::Suspended { info, ts, socket }
+            }
+            other => other,
+        };
+    }
+
+    /// `Suspended → Live`: sends SIGCONT to the same child (no respawn).
+    /// No-op for other states.
+    pub fn resume_suspended(&mut self) {
+        let prev = std::mem::replace(&mut self.state, PanelState::Absent);
+        self.state = match prev {
+            PanelState::Suspended {
+                info,
+                mut ts,
+                socket,
+            } => {
+                ts.resume();
+                PanelState::Live { info, ts, socket }
+            }
             other => other,
         };
     }
@@ -213,6 +286,7 @@ impl TerminalPanel {
     pub fn session_info(&self) -> Option<&SessionInfo> {
         match &self.state {
             PanelState::Live { info, .. } => Some(info),
+            PanelState::Suspended { info, .. } => Some(info),
             PanelState::Exited { info, .. } => Some(info),
             PanelState::Uninitialized(info) => Some(info),
             PanelState::Absent => None,
@@ -292,11 +366,142 @@ mod tests {
         }
     }
 
+    /// Like `sh_live_panel`, but spawns a plain `sleep` instead of a shell,
+    /// to verify actual OS-level signal delivery without a shell's own job
+    /// control getting in the way.
+    fn sleep_live_panel() -> TerminalPanel {
+        let info = SessionInfo {
+            provider: ProviderKind::Claude,
+            session_id: Some("test-sess".to_string()),
+            directory: std::path::PathBuf::from("/"),
+            binary: "sleep".to_string(),
+            extra_args: vec![],
+            disable_plugin: false,
+        };
+        let mut cmd = CommandBuilder::new("sleep");
+        cmd.arg("100");
+        let ts = TerminalState::new_with_cmd(cmd, None, Box::new(NullCropDetector), sh_sender(), 0)
+            .expect("sleep must be available");
+        let socket = SessionSocket::new().expect("socket creation must succeed");
+        TerminalPanel {
+            state: PanelState::Live {
+                info,
+                ts: Box::new(ts),
+                socket,
+            },
+            expanded: false,
+        }
+    }
+
+    /// Poll `/proc/<pid>/stat` for the given state char (e.g. `T` = stopped,
+    /// `S`/`R` = running/sleeping), up to a short timeout.
+    fn wait_for_proc_state(pid: libc::pid_t, want: char) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false; // process gone
+            };
+            // Format: "pid (comm) state ...". comm may itself contain ')', so
+            // split on the last ')' rather than the first.
+            if let Some((_, rest)) = stat.rsplit_once(')')
+                && let Some(state_char) = rest.trim_start().chars().next()
+                && state_char == want
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
     #[test]
     fn absent_is_not_live() {
         let mut panel = TerminalPanel::absent();
         assert!(!panel.is_live());
         assert!(panel.live_ts().is_none());
+    }
+
+    #[test]
+    fn absent_has_no_child() {
+        let panel = TerminalPanel::absent();
+        assert!(!panel.has_child());
+        assert!(!panel.is_suspended());
+    }
+
+    #[test]
+    fn suspend_transitions_live_to_suspended_and_preserves_display_state() {
+        let mut panel = sh_live_panel();
+        panel.expanded = true;
+        panel.suspend();
+        assert!(matches!(panel.state, PanelState::Suspended { .. }));
+        assert!(panel.is_suspended());
+        assert!(panel.has_child());
+        assert!(!panel.is_live());
+        assert!(panel.expanded);
+    }
+
+    // These two tests verify actual OS-level stop/continue via /proc, not just
+    // our state-machine transition.
+    #[test]
+    fn suspend_actually_stops_the_child_process() {
+        let mut panel = sleep_live_panel();
+        let pid = panel.running_ts().unwrap().child_pid().unwrap();
+        panel.suspend();
+        assert!(
+            wait_for_proc_state(pid, 'T'),
+            "child did not reach stopped state after suspend()"
+        );
+        // Clean up: bring it back so drop doesn't leave a stopped process behind.
+        panel.resume_suspended();
+    }
+
+    #[test]
+    fn resume_suspended_transitions_back_to_live_without_respawning() {
+        let mut panel = sh_live_panel();
+        let pid_before = panel.running_ts().unwrap().child_pid();
+        panel.suspend();
+        panel.resume_suspended();
+        assert!(matches!(panel.state, PanelState::Live { .. }));
+        assert!(panel.is_live());
+        assert!(!panel.is_suspended());
+        let pid_after = panel.running_ts().unwrap().child_pid();
+        assert_eq!(pid_before, pid_after, "resume must not spawn a new process");
+    }
+
+    #[test]
+    fn resume_actually_continues_the_child_process() {
+        let mut panel = sleep_live_panel();
+        let pid = panel.running_ts().unwrap().child_pid().unwrap();
+        panel.suspend();
+        assert!(wait_for_proc_state(pid, 'T'));
+        panel.resume_suspended();
+        assert!(
+            wait_for_proc_state(pid, 'S') || wait_for_proc_state(pid, 'R'),
+            "child did not resume running after resume_suspended()"
+        );
+    }
+
+    #[test]
+    fn suspend_and_resume_are_noop_on_other_states() {
+        let mut panel = TerminalPanel::absent();
+        panel.suspend();
+        assert!(matches!(panel.state, PanelState::Absent));
+        panel.resume_suspended();
+        assert!(matches!(panel.state, PanelState::Absent));
+    }
+
+    #[test]
+    fn transition_to_exited_from_suspended() {
+        let mut panel = sh_live_panel();
+        panel.suspend();
+        panel.transition_to_exited(Some(137));
+        assert!(matches!(
+            panel.state,
+            PanelState::Exited {
+                code: Some(137),
+                ..
+            }
+        ));
     }
 
     #[test]

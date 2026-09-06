@@ -415,6 +415,49 @@ impl TerminalState {
         }
     }
 
+    /// Send SIGSTOP directly to the child process, stopping it in place.
+    ///
+    /// SIGSTOP rather than SIGTSTP: the child is spawned via portable-pty's
+    /// `setsid()`, which puts it in a brand new session with no controlling
+    /// terminal, making its process group orphaned by construction. The
+    /// kernel silently discards SIGTSTP (and SIGTTIN/SIGTTOU) sent to an
+    /// orphaned process group instead of stopping it, since no session
+    /// leader could ever job-control-resume it. SIGSTOP has no such
+    /// exemption, so it always stops the process.
+    pub fn suspend(&self) {
+        if let Some(pid) = self.child_pid() {
+            unsafe {
+                libc::kill(pid, libc::SIGSTOP);
+            }
+        }
+    }
+
+    /// Send SIGCONT to the child process, then force an immediate PTY resize
+    /// (re-applying the current size, bypassing the resize debounce) so the
+    /// child's SIGWINCH handler repaints it — a more reliable repaint trigger
+    /// than relying solely on the child's own SIGCONT handling.
+    pub fn resume(&mut self) {
+        if let Some(pid) = self.child_pid() {
+            unsafe {
+                libc::kill(pid, libc::SIGCONT);
+            }
+        }
+        let _ = self.master.resize(PtySize {
+            rows: self.rows,
+            cols: self.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+    }
+
+    pub(crate) fn child_pid(&self) -> Option<libc::pid_t> {
+        self.child
+            .lock()
+            .ok()
+            .and_then(|child| child.process_id())
+            .map(|pid| pid as libc::pid_t)
+    }
+
     /// Run the crop detector against the current live screen and store the result.
     /// Called after each batch of PTY output in the main event loop.
     /// If detection returns None, the previous value is kept (sticky fallback).
