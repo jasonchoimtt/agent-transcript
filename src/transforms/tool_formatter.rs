@@ -534,13 +534,18 @@ mod tests {
 
     #[test]
     fn default_rules_applied_for_claude() {
-        // With defaults enabled, Bash should use {{command}} template automatically.
+        // With defaults enabled, Bash should use the {{description}} template
+        // automatically, and stay collapsed (no expanded=true default anymore).
         let mut fmt = ToolFormatter::new(
             crate::config::Config::default().transforms.tool_formatter,
             &ProviderKind::Claude,
             None,
         );
-        let msg = make_tool_call("Bash", Some(serde_json::json!({"command": "ls -la"})));
+        let mut msg = make_tool_call(
+            "Bash",
+            Some(serde_json::json!({"command": "ls -la", "description": "List files"})),
+        );
+        msg.expanded = false; // as UiInitializer would set for a collapsed ToolCall
         let ops = fmt.process(vec![TreeOperation::Append {
             parent_id: None,
             message: msg,
@@ -549,7 +554,11 @@ mod tests {
             panic!("expected Append");
         };
         let first_line = message.text.as_deref().unwrap().lines().next().unwrap();
-        assert_eq!(first_line, "Bash(ls -la)");
+        assert_eq!(first_line, "Bash(List files)");
+        assert!(
+            !message.expanded,
+            "Bash rule no longer forces expanded=true"
+        );
     }
 
     #[test]

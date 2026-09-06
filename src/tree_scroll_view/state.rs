@@ -2265,7 +2265,9 @@ impl TreeScrollViewState {
             if let Some(s) = run_start.take() {
                 last_run_in_turn = Some(s);
             }
-            if is_user_root(node) && let Some(s) = last_run_in_turn.take() {
+            if is_user_root(node)
+                && let Some(s) = last_run_in_turn.take()
+            {
                 starts.push(s);
             }
         }

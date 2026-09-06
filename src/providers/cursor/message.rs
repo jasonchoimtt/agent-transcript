@@ -1156,7 +1156,11 @@ mod tests {
         let mut state = ParseState::new();
         let ops = parse_blob(&fake_blob_id(), blob.to_string().as_bytes(), &mut state);
 
-        assert!(append_ids(&ops).iter().any(|id| id.starts_with("user_msg:")));
+        assert!(
+            append_ids(&ops)
+                .iter()
+                .any(|id| id.starts_with("user_msg:"))
+        );
         assert!(all_appends_at_root(&ops));
         assert!(!has_container(&ops), "no turn containers should be emitted");
     }
@@ -1251,7 +1255,11 @@ mod tests {
         ops.extend(parse_blob(&u2_id, u2.to_string().as_bytes(), &mut state));
 
         let ids = append_ids(&ops);
-        assert_eq!(ids.len(), 2, "back-to-back user messages must not be wrapped");
+        assert_eq!(
+            ids.len(),
+            2,
+            "back-to-back user messages must not be wrapped"
+        );
         assert!(ids[0].starts_with("user_msg:a"));
         assert!(ids[1].starts_with("user_msg:b"));
         assert!(all_appends_at_root(&ops));
