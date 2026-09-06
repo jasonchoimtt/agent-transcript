@@ -150,6 +150,8 @@ impl Transform for ToolFormatter {
 
 /// Render a `{{key}}` or `{{key|filter}}` template against the props JSON object.
 /// Missing keys render as empty string. Unknown filters are a no-op.
+/// Keys may be chained with `{{a or b or c}}`: the first key present with a
+/// non-empty value wins; if none are, the placeholder renders as empty string.
 fn render_template(
     template: &str,
     props: Option<&serde_json::Value>,
@@ -172,10 +174,15 @@ fn render_template(
                 inner_str.push(inner);
             }
             if closed {
-                let (key, filter) = parse_placeholder(inner_str.trim());
-                let value = props_obj
-                    .and_then(|o| o.get(key))
-                    .map(value_to_display)
+                let (keys, filter) = parse_placeholder(inner_str.trim());
+                let value = keys
+                    .iter()
+                    .find_map(|key| {
+                        props_obj
+                            .and_then(|o| o.get(*key))
+                            .map(value_to_display)
+                            .filter(|v| !v.is_empty())
+                    })
                     .unwrap_or_default();
                 let value = apply_filter(filter, value, workspace_path);
                 result.push_str(&value);
@@ -191,12 +198,14 @@ fn render_template(
     result
 }
 
-/// Split `"key|filter"` into `("key", Some("filter"))`, or `("key", None)` when no pipe.
-fn parse_placeholder(s: &str) -> (&str, Option<&str>) {
-    match s.splitn(2, '|').collect::<Vec<_>>()[..] {
-        [key, filter] => (key.trim(), Some(filter.trim())),
+/// Split `"a or b|filter"` into `(["a", "b"], Some("filter"))`, or `(["a", "b"], None)` when no pipe.
+fn parse_placeholder(s: &str) -> (Vec<&str>, Option<&str>) {
+    let (keys_part, filter) = match s.splitn(2, '|').collect::<Vec<_>>()[..] {
+        [keys_part, filter] => (keys_part.trim(), Some(filter.trim())),
         _ => (s.trim(), None),
-    }
+    };
+    let keys = keys_part.split(" or ").map(str::trim).collect();
+    (keys, filter)
 }
 
 fn apply_filter(
@@ -299,14 +308,14 @@ mod tests {
 
     #[test]
     fn parse_placeholder_no_filter() {
-        assert_eq!(parse_placeholder("file_path"), ("file_path", None));
+        assert_eq!(parse_placeholder("file_path"), (vec!["file_path"], None));
     }
 
     #[test]
     fn parse_placeholder_with_filter() {
         assert_eq!(
             parse_placeholder("file_path|path"),
-            ("file_path", Some("path"))
+            (vec!["file_path"], Some("path"))
         );
     }
 
@@ -314,7 +323,23 @@ mod tests {
     fn parse_placeholder_trims_spaces() {
         assert_eq!(
             parse_placeholder(" file_path | path "),
-            ("file_path", Some("path"))
+            (vec!["file_path"], Some("path"))
+        );
+    }
+
+    #[test]
+    fn parse_placeholder_with_or_fallback() {
+        assert_eq!(
+            parse_placeholder("description or command"),
+            (vec!["description", "command"], None)
+        );
+    }
+
+    #[test]
+    fn parse_placeholder_with_or_fallback_and_filter() {
+        assert_eq!(
+            parse_placeholder("description or command|path"),
+            (vec!["description", "command"], Some("path"))
         );
     }
 
@@ -389,6 +414,46 @@ mod tests {
     fn render_template_literal_passes_through() {
         let result = render_template("no placeholders", None, None);
         assert_eq!(result, "no placeholders");
+    }
+
+    #[test]
+    fn render_template_or_fallback_prefers_first_present() {
+        let result = render_template(
+            "{{description or command}}",
+            Some(&serde_json::json!({"command": "ls -la", "description": "List files"})),
+            None,
+        );
+        assert_eq!(result, "List files");
+    }
+
+    #[test]
+    fn render_template_or_fallback_falls_back_when_first_missing() {
+        let result = render_template(
+            "{{description or command}}",
+            Some(&serde_json::json!({"command": "ls -la"})),
+            None,
+        );
+        assert_eq!(result, "ls -la");
+    }
+
+    #[test]
+    fn render_template_or_fallback_falls_back_when_first_empty() {
+        let result = render_template(
+            "{{description or command}}",
+            Some(&serde_json::json!({"command": "ls -la", "description": ""})),
+            None,
+        );
+        assert_eq!(result, "ls -la");
+    }
+
+    #[test]
+    fn render_template_or_fallback_empty_when_all_missing() {
+        let result = render_template(
+            "{{description or command}}",
+            Some(&serde_json::json!({"other": "x"})),
+            None,
+        );
+        assert_eq!(result, "");
     }
 
     #[test]
@@ -534,8 +599,8 @@ mod tests {
 
     #[test]
     fn default_rules_applied_for_claude() {
-        // With defaults enabled, Bash should use the {{description}} template
-        // automatically, and stay collapsed (no expanded=true default anymore).
+        // With defaults enabled, Bash should use the {{description or command}}
+        // template automatically, and stay collapsed (no expanded=true default anymore).
         let mut fmt = ToolFormatter::new(
             crate::config::Config::default().transforms.tool_formatter,
             &ProviderKind::Claude,
@@ -559,6 +624,27 @@ mod tests {
             !message.expanded,
             "Bash rule no longer forces expanded=true"
         );
+    }
+
+    #[test]
+    fn default_rules_bash_falls_back_to_command_when_no_description() {
+        // Some Claude Bash tool calls never carry a "description" prop; the default
+        // rule must fall back to "command" instead of rendering "Bash()".
+        let mut fmt = ToolFormatter::new(
+            crate::config::Config::default().transforms.tool_formatter,
+            &ProviderKind::Claude,
+            None,
+        );
+        let msg = make_tool_call("Bash", Some(serde_json::json!({"command": "ls -la"})));
+        let ops = fmt.process(vec![TreeOperation::Append {
+            parent_id: None,
+            message: msg,
+        }]);
+        let TreeOperation::Append { message, .. } = &ops[0] else {
+            panic!("expected Append");
+        };
+        let first_line = message.text.as_deref().unwrap().lines().next().unwrap();
+        assert_eq!(first_line, "Bash(ls -la)");
     }
 
     #[test]
