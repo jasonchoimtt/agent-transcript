@@ -13,6 +13,10 @@ use crate::providers::{Provider, ProviderKind, TranscriptCacheKey, TranscriptEnt
 
 const REFRESH_BATCH_SIZE: usize = 10;
 
+/// Bump whenever the `transcripts` table layout changes. The table is a pure cache, so an
+/// index with a different `user_version` is dropped and rebuilt on the next refresh.
+const SCHEMA_VERSION: i64 = 1;
+
 const SCHEMA_SQL: &str = "PRAGMA journal_mode = WAL;
      CREATE TABLE IF NOT EXISTS transcripts (
          path              TEXT    PRIMARY KEY,
@@ -25,7 +29,8 @@ const SCHEMA_SQL: &str = "PRAGMA journal_mode = WAL;
          size              INTEGER,
          last_user_message TEXT,
          message_count     INTEGER NOT NULL DEFAULT 0,
-         workspace_path    TEXT
+         workspace_path    TEXT,
+         is_subagent       INTEGER NOT NULL DEFAULT 0
      ) STRICT;
      CREATE INDEX IF NOT EXISTS idx_transcripts_mtime ON transcripts (mtime_secs DESC);";
 
@@ -150,7 +155,9 @@ fn do_refresh(
         buffer.insert(idx, entry);
         while let Some(e) = buffer.remove(&next_emit) {
             next_emit += 1;
-            if let Some(e) = e {
+            if let Some(e) = e
+                && !e.is_subagent
+            {
                 batch.push(e);
                 if batch.len() >= REFRESH_BATCH_SIZE
                     && event_tx
@@ -179,7 +186,9 @@ fn do_refresh(
     // tail of all_paths consists entirely of reads that arrived out of order).
     while let Some(e) = buffer.remove(&next_emit) {
         next_emit += 1;
-        if let Some(e) = e {
+        if let Some(e) = e
+            && !e.is_subagent
+        {
             batch.push(e);
         }
     }
@@ -206,7 +215,7 @@ impl TranscriptIndex {
         std::fs::create_dir_all(&dir)?;
         let db_path = dir.join("index.db");
         let conn = Connection::open(&db_path)?;
-        conn.execute_batch(SCHEMA_SQL)?;
+        init_schema(&conn)?;
         Ok(Self { conn })
     }
 
@@ -232,7 +241,8 @@ impl TranscriptIndex {
         let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT path, provider, id, title, mtime_secs, mtime_nanos, \
-             last_user_message, message_count, workspace_path, updated_at_ms, size \
+             last_user_message, message_count, workspace_path, updated_at_ms, size, \
+             is_subagent \
              FROM transcripts \
              WHERE path IN ({placeholders})"
         );
@@ -263,6 +273,7 @@ impl TranscriptIndex {
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<i64>>(9)?,
                 row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
             ))
         }) {
             Ok(r) => r,
@@ -286,6 +297,7 @@ impl TranscriptIndex {
                 workspace_path_str,
                 updated_at_ms,
                 db_size,
+                is_subagent,
             ) = row;
 
             // Validate stored cache key against the scan-time key.
@@ -322,6 +334,7 @@ impl TranscriptIndex {
                     message_count: message_count as usize,
                     workspace_path: workspace_path_str.map(PathBuf::from),
                     provider,
+                    is_subagent: is_subagent != 0,
                 },
             );
         }
@@ -355,8 +368,9 @@ impl TranscriptIndex {
         self.conn.execute(
             "INSERT OR REPLACE INTO transcripts
              (path, provider, id, title, mtime_secs, mtime_nanos,
-              updated_at_ms, size, last_user_message, message_count, workspace_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              updated_at_ms, size, last_user_message, message_count, workspace_path,
+              is_subagent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 entry.path.to_string_lossy().as_ref(),
                 entry.provider.to_string(),
@@ -372,10 +386,22 @@ impl TranscriptIndex {
                     .workspace_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned()),
+                entry.is_subagent as i64,
             ],
         )?;
         Ok(())
     }
+}
+
+/// Create the schema, first dropping a `transcripts` table left by a different
+/// `SCHEMA_VERSION` (`CREATE TABLE IF NOT EXISTS` would otherwise keep its old columns).
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != SCHEMA_VERSION {
+        conn.execute_batch("DROP TABLE IF EXISTS transcripts;")?;
+    }
+    conn.execute_batch(SCHEMA_SQL)?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
 }
 
 fn system_time_to_parts(t: SystemTime) -> (u64, u32) {
@@ -398,14 +424,23 @@ mod tests {
 
     fn make_index() -> TranscriptIndex {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA_SQL).unwrap();
+        init_schema(&conn).unwrap();
         TranscriptIndex { conn }
     }
 
-    fn make_providers(jsonl: &PathBuf, count: Arc<AtomicUsize>) -> Arc<Vec<Box<dyn Provider>>> {
+    fn make_providers(jsonl: &Path, count: Arc<AtomicUsize>) -> Arc<Vec<Box<dyn Provider>>> {
+        make_providers_with(jsonl, count, false)
+    }
+
+    fn make_providers_with(
+        jsonl: &Path,
+        count: Arc<AtomicUsize>,
+        is_subagent: bool,
+    ) -> Arc<Vec<Box<dyn Provider>>> {
         Arc::new(vec![Box::new(CountingProvider {
-            jsonl_path: jsonl.clone(),
+            jsonl_path: jsonl.to_path_buf(),
             call_count: count,
+            is_subagent,
         }) as Box<dyn Provider>])
     }
 
@@ -413,6 +448,7 @@ mod tests {
     struct CountingProvider {
         jsonl_path: PathBuf,
         call_count: Arc<AtomicUsize>,
+        is_subagent: bool,
     }
 
     #[async_trait::async_trait]
@@ -445,6 +481,7 @@ mod tests {
                 message_count: 1,
                 workspace_path: None,
                 provider: ProviderKind::Claude,
+                is_subagent: self.is_subagent,
             })
         }
 
@@ -515,5 +552,113 @@ mod tests {
             1,
             "changed mtime should trigger re-read"
         );
+    }
+
+    /// Collect every entry sent to the picker by a finished refresh.
+    fn picker_entries(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+    ) -> Vec<TranscriptEntry> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::App(AppEvent::PickerEntries { entries }) = ev {
+                out.extend(entries);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn subagent_entries_are_cached_but_not_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl, b"{}\n").unwrap();
+
+        let index = make_index();
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        do_refresh(
+            &index,
+            make_providers_with(&jsonl, count.clone(), true),
+            None,
+            tx,
+        );
+        assert_eq!(count.load(SeqCst), 1, "first refresh reads");
+        assert!(
+            picker_entries(&mut rx).is_empty(),
+            "subagent must not be listed"
+        );
+
+        // The flag round-trips through the cache: no re-read, still hidden.
+        let count2 = Arc::new(AtomicUsize::new(0));
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        do_refresh(
+            &index,
+            make_providers_with(&jsonl, count2.clone(), true),
+            None,
+            tx2,
+        );
+        assert_eq!(
+            count2.load(SeqCst),
+            0,
+            "subagent entry should be served from cache"
+        );
+        assert!(
+            picker_entries(&mut rx2).is_empty(),
+            "cached subagent must not be listed"
+        );
+    }
+
+    #[test]
+    fn non_subagent_entries_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl, b"{}\n").unwrap();
+
+        let index = make_index();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        do_refresh(
+            &index,
+            make_providers(&jsonl, Arc::new(AtomicUsize::new(0))),
+            None,
+            tx,
+        );
+        assert_eq!(picker_entries(&mut rx).len(), 1);
+    }
+
+    #[test]
+    fn outdated_schema_is_rebuilt() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-versioning layout: no is_subagent column, user_version 0.
+        conn.execute_batch(
+            "CREATE TABLE transcripts (path TEXT PRIMARY KEY, provider TEXT NOT NULL);
+             INSERT INTO transcripts VALUES ('/old', 'claude');",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transcripts') WHERE name = 'is_subagent'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(has_column, "rebuilt table should have is_subagent");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transcripts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "stale cache rows should be dropped");
+
+        // Re-opening at the current version keeps the data.
+        conn.execute("INSERT INTO transcripts (path, provider, id, title, mtime_secs, mtime_nanos) VALUES ('/new', 'claude', 'x', 't', 0, 0)", [])
+            .unwrap();
+        init_schema(&conn).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transcripts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "same-version reopen must not drop the cache");
     }
 }

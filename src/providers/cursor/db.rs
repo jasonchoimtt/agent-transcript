@@ -10,6 +10,14 @@ pub struct CursorDb {
     conn: Connection,
 }
 
+/// Session-level fields from the `meta` table.
+pub struct SessionMeta {
+    pub name: String,
+    pub created_at_ms: i64,
+    /// Set when the session was spawned by a parent agent (meta has `subagentInfo`).
+    pub is_subagent: bool,
+}
+
 impl CursorDb {
     pub fn open(path: &Path) -> color_eyre::Result<Self> {
         let conn = Connection::open_with_flags(
@@ -33,12 +41,13 @@ impl CursorDb {
         Ok(obj)
     }
 
-    /// Returns (name, created_at_ms).
-    pub fn session_meta(&self) -> color_eyre::Result<(String, i64)> {
+    pub fn session_meta(&self) -> color_eyre::Result<SessionMeta> {
         let obj = self.read_meta_json()?;
-        let name = obj["name"].as_str().unwrap_or("").to_string();
-        let created_at = obj["createdAt"].as_i64().unwrap_or(0);
-        Ok((name, created_at))
+        Ok(SessionMeta {
+            name: obj["name"].as_str().unwrap_or("").to_string(),
+            created_at_ms: obj["createdAt"].as_i64().unwrap_or(0),
+            is_subagent: obj.get("subagentInfo").is_some_and(|v| !v.is_null()),
+        })
     }
 
     pub fn latest_root_blob_id(&self) -> color_eyre::Result<String> {
@@ -90,6 +99,38 @@ mod tests {
 
     use super::*;
 
+    /// Write a store.db whose only content is a meta row holding `meta_json`.
+    fn db_with_meta(dir: &Path, meta_json: &str) -> PathBuf {
+        let path = dir.join("store.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
+            .unwrap();
+        let hex: String = meta_json.bytes().map(|b| format!("{b:02x}")).collect();
+        conn.execute("INSERT INTO meta VALUES ('0', ?1)", [hex])
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn session_meta_detects_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_with_meta(
+            dir.path(),
+            r#"{"name":"New Agent","createdAt":1,"subagentInfo":{"parentAgentId":"p","rootParentAgentId":"p","toolCallId":"t","typeName":"generalPurpose"}}"#,
+        );
+        let meta = CursorDb::open(&path).unwrap().session_meta().unwrap();
+        assert!(meta.is_subagent);
+        assert_eq!(meta.name, "New Agent");
+    }
+
+    #[test]
+    fn session_meta_without_subagent_info_is_not_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db_with_meta(dir.path(), r#"{"name":"Parent","createdAt":1}"#);
+        let meta = CursorDb::open(&path).unwrap().session_meta().unwrap();
+        assert!(!meta.is_subagent);
+    }
+
     fn find_any_cursor_db() -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         glob::glob(&format!("{}/.cursor/chats/*/*/store.db", home))
@@ -107,12 +148,14 @@ mod tests {
             return;
         };
         let db = CursorDb::open(&db_path).unwrap();
-        let (name, created_at) = db.session_meta().unwrap();
-        assert!(!name.is_empty(), "session name should be non-empty");
-        assert!(created_at > 0, "created_at should be positive");
+        let meta = db.session_meta().unwrap();
+        assert!(!meta.name.is_empty(), "session name should be non-empty");
+        assert!(meta.created_at_ms > 0, "created_at should be positive");
         println!(
-            "path={} name={name} created_at={created_at}",
-            db_path.display()
+            "path={} name={} created_at={}",
+            db_path.display(),
+            meta.name,
+            meta.created_at_ms
         );
     }
 

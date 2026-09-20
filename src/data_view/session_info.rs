@@ -112,6 +112,7 @@ mod tests {
             message_count: 42,
             workspace_path: workspace.map(std::path::PathBuf::from),
             provider,
+            is_subagent: false,
         }
     }
 

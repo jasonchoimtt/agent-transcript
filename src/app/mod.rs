@@ -810,6 +810,7 @@ impl App {
             message_count: 0,
             workspace_path,
             provider: provider_kind,
+            is_subagent: false,
         };
         let nodes = build_session_info_nodes(&entry);
         self.data_view = Some(DataViewState::from_nodes(nodes));

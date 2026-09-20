@@ -81,7 +81,7 @@ impl Provider for CursorProvider {
 
     fn read_entry(&self, path: &Path) -> Option<TranscriptEntry> {
         let db = CursorDb::open(path).ok()?;
-        let (name, _created_at) = db.session_meta().ok()?;
+        let session = db.session_meta().ok()?;
 
         let session_id = path
             .parent()
@@ -119,10 +119,10 @@ impl Provider for CursorProvider {
         Some(TranscriptEntry {
             path: path.to_owned(),
             id: session_id,
-            title: if name.is_empty() {
+            title: if session.name.is_empty() {
                 "(unnamed)".to_string()
             } else {
-                name
+                session.name
             },
             mtime,
             updated_at,
@@ -131,6 +131,7 @@ impl Provider for CursorProvider {
             message_count,
             workspace_path,
             provider: ProviderKind::Cursor,
+            is_subagent: session.is_subagent,
         })
     }
 

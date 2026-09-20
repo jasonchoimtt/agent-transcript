@@ -91,6 +91,8 @@ pub struct TranscriptEntry {
     pub message_count: usize,
     pub workspace_path: Option<PathBuf>,
     pub provider: ProviderKind,
+    /// Session was spawned by a parent agent; hidden from the picker.
+    pub is_subagent: bool,
 }
 
 pub struct LoadConfig {

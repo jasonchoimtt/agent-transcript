@@ -265,6 +265,7 @@ impl Provider for ClaudeProvider {
             message_count,
             workspace_path,
             provider: ProviderKind::Claude,
+            is_subagent: false,
         })
     }
 
