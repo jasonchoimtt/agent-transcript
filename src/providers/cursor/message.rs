@@ -13,6 +13,15 @@ pub struct ParseState {
     pub pending_tool_calls: HashMap<String, serde_json::Value>,
     /// True after the first streaming:pending node has been emitted; switches Append → Replace.
     pub has_pending: bool,
+    /// Background task ID (`shellId` / `agentId`) → the tool call that started it, so a
+    /// later `<system_notification>` can attach the outcome to that call.
+    pub background_tasks: HashMap<String, BackgroundTask>,
+}
+
+pub struct BackgroundTask {
+    pub tool_call_id: String,
+    /// True for a background `Task` (subagent) call; false for a background shell.
+    pub is_subagent: bool,
 }
 
 impl Default for ParseState {
@@ -27,6 +36,7 @@ impl ParseState {
             seen_blobs: HashSet::new(),
             pending_tool_calls: HashMap::new(),
             has_pending: false,
+            background_tasks: HashMap::new(),
         }
     }
 }
@@ -70,9 +80,10 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
 
         "user" => {
             let raw = extract_content_text(&obj["content"]);
-            let notification = format_system_notification(&strip_timestamp(&raw).0);
+            let (untimed, _) = strip_timestamp(&raw);
+            let notification = TaskNotification::parse(&untimed);
             let (text, ts_str) = strip_message_tags(&raw);
-            let text = notification.clone().unwrap_or(text);
+            let text = notification.as_ref().map_or(text, TaskNotification::summary);
             let timestamp = ts_str.as_deref().and_then(parse_timestamp);
             // No <user_query> and starts with <user_info> → pure Cursor context injection.
             let is_injected = text.trim().starts_with("<user_info>");
@@ -101,6 +112,9 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 parent_id: None,
                 message: user_msg,
             });
+            if let Some(n) = &notification {
+                ops.extend(n.link_ops(state, &obj));
+            }
         }
 
         "assistant" => {
@@ -184,38 +198,40 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
 
                 let old_node_id = format!("tool_call:{}", tool_call_id);
 
+                // Shell reports `isBackground` beside `success`, Task inside it.  Shells
+                // backgrounded after a timeout carry only `backgroundReason`.
+                let output = &obj["providerOptions"]["cursor"]["highLevelToolCallResult"]["output"];
+                let success = &output["success"];
+                let is_background = output["isBackground"].as_bool().unwrap_or(false)
+                    || success["isBackground"].as_bool().unwrap_or(false)
+                    || success["backgroundReason"].is_string();
+                let background_id = match (&success["shellId"], &success["agentId"]) {
+                    (serde_json::Value::Number(n), _) => Some(n.to_string()),
+                    (_, serde_json::Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                if is_background && let Some(id) = background_id {
+                    state.background_tasks.insert(
+                        id,
+                        BackgroundTask {
+                            tool_call_id: tool_call_id.to_string(),
+                            is_subagent: tool_name == "Task",
+                        },
+                    );
+                }
+
                 if tool_name == "Task" {
-                    let result_text = extract_task_result_text(block);
+                    // The Task call stays a ToolCall; its outcome (and, on success, the
+                    // subagent's conversation steps) become its children.
+                    let task_output =
+                        &block["providerOptions"]["cursor"]["highLevelToolCallResult"]["output"];
+                    let failure = &task_output["failure"];
+                    let is_error = !failure.is_null();
 
-                    // Check for conversationSteps in providerOptions.
-                    let steps = block["providerOptions"]["cursor"]["highLevelToolCallResult"]
-                        ["output"]["success"]["conversationSteps"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-
-                    let failure = &block["providerOptions"]["cursor"]["highLevelToolCallResult"]["output"]
-                        ["failure"];
-
-                    if !failure.is_null() {
+                    let children = if is_error {
                         let failure_text = failure.as_str().unwrap_or("[task failed]").to_string();
-                        let call_name = call_block["toolName"].as_str().unwrap_or(tool_name);
-                        let call_props = extract_args_props(&call_block["args"]);
-                        let mut replace_node = MessageState::new(old_node_id.clone())
-                            .text(call_name)
-                            .data(call_block.to_string())
-                            .message_type(MessageType::ToolCall)
-                            .tag("error");
-                        if let Some(p) = call_props {
-                            replace_node = replace_node.props(p);
-                        }
-                        ops.push(TreeOperation::Replace {
-                            id: old_node_id.clone(),
-                            message: replace_node,
-                        });
-                        ops.push(TreeOperation::Append {
-                            parent_id: Some(old_node_id),
-                            message: MessageState::new(format!("tool_result:{}", tool_call_id))
+                        vec![
+                            MessageState::new(format!("tool_result:{}", tool_call_id))
                                 .text(failure_text)
                                 .data(
                                     serde_json::json!({ "call": call_block, "result": block, "message": &obj })
@@ -223,40 +239,38 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                                 )
                                 .message_type(MessageType::ToolResult)
                                 .tag("error"),
-                        });
+                        ]
                     } else {
-                        let task_id = format!("task:{}", tool_call_id);
-                        let mut task_children = vec![
-                            MessageState::new(format!("task_summary:{}", tool_call_id))
-                                .text(result_text.clone())
-                                .data(block.to_string())
-                                .message_type(MessageType::TaskSummary),
-                        ];
+                        let steps = task_output["success"]["conversationSteps"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        let summary = MessageState::new(format!("task_summary:{}", tool_call_id))
+                            .text(extract_task_result_text(block))
+                            .data(block.to_string())
+                            .message_type(MessageType::TaskSummary);
+                        std::iter::once(summary)
+                            .chain(steps.iter().enumerate().filter_map(|(i, step)| {
+                                build_subagent_node(tool_call_id, i, step)
+                            }))
+                            .collect()
+                    };
 
-                        for (i, step) in steps.iter().enumerate() {
-                            if let Some(child) = build_subagent_node(tool_call_id, i, step) {
-                                task_children.push(child);
-                            }
-                        }
-
-                        ops.push(TreeOperation::Replace {
-                            id: old_node_id,
-                            message: MessageState::new(task_id)
-                                .text(result_text)
-                                .data(
-                                    serde_json::json!({
-                                        "call": call_block,
-                                        "result": block,
-                                        "message": &obj
-                                    })
-                                    .to_string(),
-                                )
-                                .message_type(MessageType::Container)
-                                .tag("task")
-                                .indent_children(true)
-                                .children(task_children),
-                        });
+                    let call_name = call_block["toolName"].as_str().unwrap_or(tool_name);
+                    let mut task_node = MessageState::new(old_node_id.clone())
+                        .text(call_name)
+                        .data(call_block.to_string())
+                        .message_type(MessageType::ToolCall)
+                        .tag(if is_error { "error" } else { "success" })
+                        .indent_children(true)
+                        .children(children);
+                    if let Some(p) = extract_args_props(&call_block["args"]) {
+                        task_node = task_node.props(p);
                     }
+                    ops.push(TreeOperation::Replace {
+                        id: old_node_id,
+                        message: task_node,
+                    });
                 } else {
                     // Regular tool result: tag the ToolCall and append ToolResult as child.
                     let result_text = block["result"].as_str().unwrap_or("").to_string();
@@ -390,38 +404,132 @@ fn strip_timestamp(text: &str) -> (String, Option<String>) {
     (text.to_string(), None)
 }
 
-/// Formats a Cursor `<system_notification>` user message (injected when a
-/// background task finishes) as a one-line summary like
-/// `"Completed: Restart dev server"`.  `text` must already have its timestamp
-/// stripped.  Returns `None` when `text` is not a notification or lacks a
-/// `<task>` block with a `title`.
-fn format_system_notification(text: &str) -> Option<String> {
-    let text = text.trim_start();
-    if !text.starts_with("<system_notification>") {
-        return None;
-    }
-    let task = extract_xml_tag(text, "task")?;
-    let field = |key: &str| {
-        task.lines().find_map(|line| {
-            let (k, v) = line.trim().split_once(':')?;
-            (k.trim() == key).then(|| v.trim())
-        })
-    };
-    let title = field("title").filter(|t| !t.is_empty())?;
-    let label = match field("status").unwrap_or("") {
-        "success" | "completed" => "Completed".to_string(),
-        "error" | "failure" | "failed" => "Failed".to_string(),
-        "cancelled" | "canceled" | "aborted" => "Cancelled".to_string(),
-        "" => "Finished".to_string(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|c| c.to_uppercase().chain(chars).collect())
-                .unwrap_or_default()
+/// A background-task completion notice from a Cursor `<system_notification>` user
+/// message.  The `<task>` block holds `key: value` header lines, optionally followed
+/// by free text (a subagent's full report):
+///
+/// ```text
+/// <task>
+/// kind: shell
+/// status: error
+/// task_id: 825186
+/// title: Start dev server
+/// detail: exit_code=143
+/// </task>
+/// ```
+struct TaskNotification<'a> {
+    /// Matches the `shellId` / `agentId` of the background tool call that started the task.
+    task_id: Option<&'a str>,
+    title: &'a str,
+    /// Human-readable status, e.g. `"Completed"` or `"Failed"`.
+    label: String,
+    is_error: bool,
+    detail: Option<&'a str>,
+    /// Text after the header lines; empty for shell tasks.
+    body: &'a str,
+}
+
+impl<'a> TaskNotification<'a> {
+    /// Parses `text` (timestamp already stripped).  Returns `None` when `text` is not
+    /// a notification or lacks a `<task>` block with a `title`.
+    fn parse(text: &'a str) -> Option<Self> {
+        const HEADER_KEYS: [&str; 5] = ["kind", "status", "task_id", "title", "detail"];
+
+        let text = text.trim_start();
+        if !text.starts_with("<system_notification>") {
+            return None;
         }
-    };
-    Some(format!("{label}: {title}"))
+        let task = extract_xml_tag(text, "task")?.trim_start_matches('\n');
+
+        // Header lines run until the first line that isn't a known `key: value`; the
+        // remainder is the body.  Known keys only, so a report line like `Note: …`
+        // stays in the body.
+        let mut fields = HashMap::new();
+        let mut body_start = task.len();
+        let mut offset = 0;
+        for line in task.split_inclusive('\n') {
+            match line.trim_end().split_once(": ") {
+                Some((k, v)) if HEADER_KEYS.contains(&k) => {
+                    fields.insert(k, v.trim());
+                }
+                _ => {
+                    body_start = offset;
+                    break;
+                }
+            }
+            offset += line.len();
+        }
+
+        let title = fields.get("title").copied().filter(|t| !t.is_empty())?;
+        let status = fields.get("status").copied().unwrap_or("");
+        let label = match status {
+            "success" | "completed" => "Completed".to_string(),
+            "error" | "failure" | "failed" => "Failed".to_string(),
+            "cancelled" | "canceled" | "aborted" => "Cancelled".to_string(),
+            "" => "Finished".to_string(),
+            other => {
+                let mut chars = other.chars();
+                chars
+                    .next()
+                    .map(|c| c.to_uppercase().chain(chars).collect())
+                    .unwrap_or_default()
+            }
+        };
+        Some(Self {
+            task_id: fields.get("task_id").copied(),
+            title,
+            is_error: label == "Failed",
+            label,
+            detail: fields.get("detail").copied().filter(|d| !d.is_empty()),
+            body: task[body_start..].trim(),
+        })
+    }
+
+    /// One-line summary for the user-message node, e.g. `"Completed: Start dev server"`.
+    fn summary(&self) -> String {
+        format!("{}: {}", self.label, self.title)
+    }
+
+    /// Ops that attach the task's outcome to the tool call that started it.
+    /// Returns nothing when the originating call wasn't seen in this transcript.
+    fn link_ops(&self, state: &ParseState, data: &serde_json::Value) -> Vec<TreeOperation> {
+        let Some(task) = self.task_id.and_then(|id| state.background_tasks.get(id)) else {
+            return vec![];
+        };
+        let tool_call_id = &task.tool_call_id;
+
+        if task.is_subagent {
+            // A background Task call's summary child still says "running in the
+            // background"; fill it with the report.
+            let summary_id = format!("task_summary:{tool_call_id}");
+            let text = if self.body.is_empty() {
+                self.summary()
+            } else {
+                self.body.to_string()
+            };
+            vec![TreeOperation::Replace {
+                id: summary_id.clone(),
+                message: MessageState::new(summary_id)
+                    .text(text)
+                    .data(data.to_string())
+                    .message_type(MessageType::TaskSummary),
+            }]
+        } else {
+            // Shell: the call's own result only says "started"; add the final outcome.
+            let text = match self.detail {
+                Some(detail) => format!("{} ({detail})", self.label),
+                None => self.label.clone(),
+            };
+            vec![TreeOperation::Append {
+                parent_id: Some(format!("tool_call:{tool_call_id}")),
+                message: MessageState::new(format!("background_result:{tool_call_id}"))
+                    .text(text)
+                    .data(data.to_string())
+                    .message_type(MessageType::ToolResult)
+                    .tag(if self.is_error { "error" } else { "success" }),
+            }]
+        }
+    }
 }
 
 /// Strips `<timestamp>…</timestamp>` and `<user_query>…</user_query>` wrappers
@@ -743,6 +851,161 @@ mod tests {
         let msg = parse_single_user_msg(&content);
         assert!(msg.text.as_deref().unwrap().starts_with("Why does this show up?"));
         assert_eq!(msg.tag, None);
+    }
+
+    #[test]
+    fn test_task_notification_splits_header_and_body() {
+        let text = "<system_notification>\n<task>\nkind: subagent\nstatus: success\n\
+                    task_id: abc\ntitle: Explore\ndetail: Exploring things\n\
+                    # Report\nNote: keep me\n</task>\n</system_notification>";
+        let n = TaskNotification::parse(text).unwrap();
+        assert_eq!(n.task_id, Some("abc"));
+        assert_eq!(n.detail, Some("Exploring things"));
+        assert_eq!(n.body, "# Report\nNote: keep me");
+    }
+
+    /// Feeds a background tool call + its result through `parse_blob`.
+    /// `output` is the tool message's `highLevelToolCallResult.output`.
+    fn start_background_call(
+        state: &mut ParseState,
+        tool_name: &str,
+        tc_id: &str,
+        output: serde_json::Value,
+    ) {
+        state.pending_tool_calls.insert(
+            tc_id.to_string(),
+            serde_json::json!({"type": "tool-call", "toolName": tool_name, "toolCallId": tc_id, "args": {}}),
+        );
+        let tool_blob = serde_json::json!({
+            "role": "tool",
+            "content": [{"type": "tool-result", "toolName": tool_name, "toolCallId": tc_id, "result": "started"}],
+            "providerOptions": {"cursor": {"highLevelToolCallResult": {"output": output}}}
+        });
+        // Helpers reuse blob IDs; forget them so repeated calls aren't deduplicated.
+        state.seen_blobs.clear();
+        parse_blob(&"c".repeat(64), tool_blob.to_string().as_bytes(), state);
+    }
+
+    fn parse_notification(state: &mut ParseState, task: &str) -> Vec<TreeOperation> {
+        let content =
+            format!("<system_notification>\nFinished.\n\n<task>\n{task}\n</task>\n</system_notification>");
+        let blob = serde_json::json!({"role": "user", "content": content});
+        state.seen_blobs.clear();
+        parse_blob(&"e".repeat(64), blob.to_string().as_bytes(), state)
+    }
+
+    #[test]
+    fn test_shell_notification_appends_outcome_to_originating_call() {
+        let mut state = ParseState::new();
+        start_background_call(
+            &mut state,
+            "Shell",
+            "tc_shell",
+            serde_json::json!({"success": {"shellId": 825186}, "isBackground": true}),
+        );
+        // Backgrounded after a timeout: no `isBackground`, only `backgroundReason`.
+        start_background_call(
+            &mut state,
+            "Shell",
+            "tc_timeout",
+            serde_json::json!({"success": {"shellId": 7, "backgroundReason": "SHELL_BACKGROUND_REASON_TIMEOUT"}}),
+        );
+        let ops = parse_notification(
+            &mut state,
+            "kind: shell\nstatus: error\ntask_id: 825186\ntitle: Start server\ndetail: exit_code=143",
+        );
+        assert_eq!(ops.len(), 2, "user message + linked result");
+        match &ops[1] {
+            TreeOperation::Append { parent_id, message } => {
+                assert_eq!(parent_id.as_deref(), Some("tool_call:tc_shell"));
+                assert_eq!(message.text.as_deref(), Some("Failed (exit_code=143)"));
+                assert_eq!(message.tag.as_deref(), Some("error"));
+                assert_eq!(message.message_type, MessageType::ToolResult);
+            }
+            _ => panic!("expected Append"),
+        }
+
+        let ops = parse_notification(
+            &mut state,
+            "kind: shell\nstatus: success\ntask_id: 7\ntitle: Slow build",
+        );
+        assert!(
+            matches!(&ops[1], TreeOperation::Append { parent_id, message }
+                if parent_id.as_deref() == Some("tool_call:tc_timeout")
+                    && message.text.as_deref() == Some("Completed")),
+            "timeout-backgrounded shell should link"
+        );
+    }
+
+    #[test]
+    fn test_task_result_keeps_tool_call_with_summary_child() {
+        let mut state = ParseState::new();
+        state.pending_tool_calls.insert(
+            "tc2".to_string(),
+            serde_json::json!({"type": "tool-call", "toolName": "Task", "toolCallId": "tc2",
+                               "args": {"description": "Explore"}}),
+        );
+        let tool_blob = serde_json::json!({
+            "role": "tool",
+            "content": [{"type": "tool-result", "toolName": "Task", "toolCallId": "tc2", "result": "done"}]
+        });
+        let ops = parse_blob(&"d".repeat(64), tool_blob.to_string().as_bytes(), &mut state);
+
+        let [TreeOperation::Replace { id, message }] = ops.as_slice() else {
+            panic!("expected a single Replace");
+        };
+        assert_eq!(id, "tool_call:tc2");
+        assert_eq!(message.id, "tool_call:tc2");
+        assert_eq!(message.message_type, MessageType::ToolCall);
+        assert_eq!(message.tag.as_deref(), Some("success"));
+        assert!(message.props.is_some(), "args kept for ToolFormatter");
+        assert_eq!(message.children.len(), 1);
+        assert_eq!(message.children[0].id, "task_summary:tc2");
+        assert_eq!(message.children[0].text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn test_subagent_notification_fills_task_summary() {
+        let mut state = ParseState::new();
+        start_background_call(
+            &mut state,
+            "Task",
+            "tc_task",
+            serde_json::json!({"success": {"agentId": "agent-1", "isBackground": true}}),
+        );
+        let ops = parse_notification(
+            &mut state,
+            "kind: subagent\nstatus: success\ntask_id: agent-1\ntitle: Explore\n\
+             detail: Exploring\n# Report\nAll good.",
+        );
+        assert_eq!(ops.len(), 2, "user message + linked summary");
+        match &ops[1] {
+            TreeOperation::Replace { id, message } => {
+                assert_eq!(id, "task_summary:tc_task");
+                assert_eq!(message.text.as_deref(), Some("# Report\nAll good."));
+                assert_eq!(message.message_type, MessageType::TaskSummary);
+            }
+            _ => panic!("expected Replace"),
+        }
+    }
+
+    #[test]
+    fn test_notification_without_background_origin_is_not_linked() {
+        let mut state = ParseState::new();
+        // Foreground shell: carries a shellId but no isBackground flag.
+        start_background_call(
+            &mut state,
+            "Shell",
+            "tc_fg",
+            serde_json::json!({"success": {"shellId": 1}}),
+        );
+        for task_id in ["1", "999"] {
+            let ops = parse_notification(
+                &mut state,
+                &format!("kind: shell\nstatus: success\ntask_id: {task_id}\ntitle: X"),
+            );
+            assert_eq!(ops.len(), 1, "task_id {task_id}: only the user message");
+        }
     }
 
     #[test]

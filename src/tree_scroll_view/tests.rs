@@ -1504,14 +1504,13 @@ fn turn_nav_looks_through_markdown_splitter_group_wrapper() {
 
 #[test]
 fn turn_nav_treats_non_group_container_as_a_hard_break() {
-    // Cursor's "task" sub-agent grouping is a visible, non-group Container: it is
-    // opaque to turn navigation and separates the prose runs around it.
+    // A visible, non-group Container (e.g. one built by a Lua transform) is opaque to
+    // turn navigation and separates the prose runs around it.
     let mut state = TreeScrollViewState::new(vec![
         node("user:0", MessageType::UserMessage, "u0"),
         node("agent:0", MessageType::AgentMessage, "a0"),
-        MessageState::new("task:0")
+        MessageState::new("container:0")
             .message_type(MessageType::Container)
-            .tag("task")
             .children(vec![node("sub:0", MessageType::AgentMessage, "s0")]),
         node("agent:1", MessageType::AgentMessage, "a1"),
     ]);

@@ -149,7 +149,6 @@ tools = ["WebSearch"]
 template = "{{query}}"
 
 [[transforms.tool_formatter.default_rules]]
-providers = ["claude"]
 tools = ["Task", "Agent"]
 template = "{{description}}"
 
