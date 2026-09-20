@@ -29,7 +29,7 @@ pub mod tree_operation;
 pub mod tree_scroll_view;
 
 const USAGE: &str = "\
-Usage: agt [--resume] [--debug] [<provider>[:<session-id>]]
+Usage: agt [--resume] [--debug] [<provider>[:<session-id>]] [-- <agent-args>...]
        agt parse [--waterfall] [--debug] [--trace] [--debug-transform <name>] <provider>:<session-id>
        agt install-hooks <provider>
        agt -h | --help
@@ -44,6 +44,7 @@ Options:
       --resume                 Re-launch the agent CLI into the given session
       --debug                  Enable debug logging to /tmp/agent-transcript.log
   -h, --help                   Show this message
+  -- <agent-args>...           Pass the remaining args to the agent CLI (requires <provider>)
 
 Subcommands:
   parse [--waterfall] [--debug] [--trace] [--debug-transform <name>] <provider>:<session-id>
@@ -62,6 +63,7 @@ Examples:
   agt claude                                       Start a new Claude Code session
   agt claude:abc123                                View session abc123
   agt --resume claude:abc123                       Resume Claude Code in session abc123
+  agt claude -- --model sonnet                     Start Claude Code with `--model sonnet`
   agt parse cursor:abc123                          Dump parsed+transformed tree for a Cursor session
   agt parse claude:abc123                          Dump parsed+transformed tree for a Claude session
   agt parse --waterfall claude:abc123              Simulate live streaming and show rewind events
@@ -98,10 +100,32 @@ fn parse_mode_args(resume: bool, free_arg: Option<&str>) -> color_eyre::Result<S
     }
 }
 
-fn parse_args() -> color_eyre::Result<StartMode> {
+/// Split process args (without the program name) at the first `--`: args before it are
+/// agt's own, args after it are passed through to the agent CLI.
+fn split_passthrough(args: Vec<String>) -> (Vec<String>, Vec<String>) {
+    match args.iter().position(|a| a == "--") {
+        Some(i) => {
+            let mut own = args;
+            let passthrough = own.split_off(i + 1);
+            own.pop(); // the `--` itself
+            (own, passthrough)
+        }
+        None => (args, Vec::new()),
+    }
+}
+
+/// agt's own args (program name and anything after `--` excluded).
+fn own_args() -> Vec<String> {
+    split_passthrough(std::env::args().skip(1).collect()).0
+}
+
+/// Returns the start mode and the args to pass through to the agent CLI.
+fn parse_args() -> color_eyre::Result<(StartMode, Vec<String>)> {
+    let (own, passthrough) = split_passthrough(std::env::args().skip(1).collect());
+
     // Scan raw args first: pico_args would silently consume unknown flags as
     // positional args, so we must check before handing off.
-    for arg in std::env::args().skip(1) {
+    for arg in &own {
         match arg.as_str() {
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -117,7 +141,8 @@ fn parse_args() -> color_eyre::Result<StartMode> {
         }
     }
 
-    let mut args = pico_args::Arguments::from_env();
+    let mut args =
+        pico_args::Arguments::from_vec(own.into_iter().map(std::ffi::OsString::from).collect());
     let resume = args.contains("--resume");
     let _debug = args.contains("--debug"); // consumed here; init happens before parse_args
 
@@ -138,7 +163,11 @@ fn parse_args() -> color_eyre::Result<StartMode> {
         std::process::exit(1);
     }
 
-    parse_mode_args(resume, free.as_deref())
+    let mode = parse_mode_args(resume, free.as_deref())?;
+    if !passthrough.is_empty() && matches!(mode, StartMode::Picker) {
+        color_eyre::eyre::bail!("`--` requires a <provider> to pass the args to");
+    }
+    Ok((mode, passthrough))
 }
 
 fn main() {
@@ -203,9 +232,9 @@ fn main() {
 async fn run_app() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let debug = std::env::args().any(|a| a == "--debug");
+    let debug = own_args().iter().any(|a| a == "--debug");
     let is_parse = std::env::args().nth(1).as_deref() == Some("parse");
-    let trace = is_parse && std::env::args().any(|a| a == "--trace");
+    let trace = is_parse && own_args().iter().any(|a| a == "--trace");
     let log_buffer = LogBuffer::new(2000);
     let debug_handle = logging::init_tracing(debug, trace, log_buffer.clone(), is_parse)?;
     if trace {
@@ -240,13 +269,20 @@ async fn run_app() -> color_eyre::Result<()> {
         return cmd_parse::run(&session_arg, &config, waterfall, debug_transform.as_deref()).await;
     }
 
-    let start_mode = parse_args().unwrap_or_else(|e| {
+    let (start_mode, passthrough) = parse_args().unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
 
     let host_bg = query_host_bg_color();
-    let config = Config::load();
+    let mut config = Config::load();
+    if let StartMode::Session { provider, .. } | StartMode::NewSession { provider } = &start_mode {
+        config
+            .agents
+            .get_mut(provider)
+            .extra_args
+            .extend(passthrough);
+    }
     let terminal = ratatui::init();
     let result = App::new(start_mode, host_bg, config, log_buffer, debug_handle)
         .await?
@@ -327,6 +363,32 @@ mod tests {
             }
             _ => panic!("expected Session"),
         }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn split_passthrough_without_separator() {
+        let (own, passthrough) = split_passthrough(strings(&["--resume", "claude:abc"]));
+        assert_eq!(own, strings(&["--resume", "claude:abc"]));
+        assert!(passthrough.is_empty());
+    }
+
+    #[test]
+    fn split_passthrough_at_first_separator() {
+        let (own, passthrough) =
+            split_passthrough(strings(&["claude", "--", "--model", "sonnet", "--", "x"]));
+        assert_eq!(own, strings(&["claude"]));
+        assert_eq!(passthrough, strings(&["--model", "sonnet", "--", "x"]));
+    }
+
+    #[test]
+    fn split_passthrough_trailing_separator() {
+        let (own, passthrough) = split_passthrough(strings(&["claude", "--"]));
+        assert_eq!(own, strings(&["claude"]));
+        assert!(passthrough.is_empty());
     }
 
     #[test]

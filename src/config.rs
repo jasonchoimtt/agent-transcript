@@ -57,6 +57,15 @@ pub struct AgentsConfig {
     pub cursor: AgentConfig,
 }
 
+impl AgentsConfig {
+    pub fn get_mut(&mut self, provider: &crate::providers::ProviderKind) -> &mut AgentConfig {
+        match provider {
+            crate::providers::ProviderKind::Claude => &mut self.claude,
+            crate::providers::ProviderKind::Cursor => &mut self.cursor,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
     pub binary: String,

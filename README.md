@@ -84,6 +84,10 @@ agt --resume claude:<uuid>
 # New session
 agt claude
 agt cursor
+
+# Pass args after `--` through to the agent CLI
+agt claude -- --model sonnet
+agt --resume claude:<uuid> -- --model sonnet
 ```
 
 ### Exploring a transcript
