@@ -6,6 +6,7 @@ bash-input           = { indicator = "!", indicator_style = { fg = "magenta" } }
 local-command-stdout = { indicator = "→", indicator_style = { fg = "muted" } }
 bash-stdout          = { indicator = "→", indicator_style = { fg = "muted" } }
 attachment           = { indicator = " ", content = { dim = true } }
+system_notification  = { indicator = "❯", content = { dim = true } }
 
 [agent_message]
 indicator = "●"

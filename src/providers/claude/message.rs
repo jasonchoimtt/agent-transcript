@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::providers::extract_xml_tag;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
@@ -107,16 +108,6 @@ pub(super) fn parse_entry_cb(
     }
 }
 
-/// Extract the text content of `<tag>…</tag>` from `xml`. Returns `None` when the
-/// tag is absent.  Handles only the first occurrence; does not unescape entities.
-fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(open.as_str())? + open.len();
-    let end = xml[start..].find(close.as_str())? + start;
-    Some(&xml[start..end])
-}
-
 /// Handle a `<task-notification>` user message: show just the `<summary>` tag text
 /// as the visible user message, and backfill the matching TaskSummary node with the
 /// `<result>` from the notification.
@@ -135,6 +126,12 @@ fn handle_task_notification(
 
     let summary_val = serde_json::Value::String(summary);
     let mut ops = emit_user_message(obj, &summary_val, uuid, state, prefix);
+    // Shared tag with Cursor's `<system_notification>` so both render dimmed.
+    for op in &mut ops {
+        if let TreeOperation::Append { message, .. } | TreeOperation::Replace { message, .. } = op {
+            message.tag = Some("system_notification".to_string());
+        }
+    }
 
     if let (Some(result_text), Some(tuid)) = (result, tool_use_id) {
         let summary_id = format!("{}task_summary:{}", prefix, tuid);
@@ -1339,6 +1336,10 @@ mod tests {
             user_msg.unwrap().text.as_deref(),
             Some("Agent \"My task\" completed"),
             "user message text should be the summary"
+        );
+        assert_eq!(
+            user_msg.unwrap().tag.as_deref(),
+            Some("system_notification")
         );
 
         // Should also emit a Replace for the TaskSummary node.

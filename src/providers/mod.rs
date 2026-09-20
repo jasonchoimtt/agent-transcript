@@ -151,6 +151,16 @@ pub trait Provider: Send + Sync {
     ) -> color_eyre::Result<Box<dyn TranscriptReader>>;
 }
 
+/// Extract the text content of `<tag>…</tag>` from `xml`. Returns `None` when the
+/// tag is absent.  Handles only the first occurrence; does not unescape entities.
+pub(crate) fn extract_xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(open.as_str())? + open.len();
+    let end = xml[start..].find(close.as_str())? + start;
+    Some(&xml[start..end])
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

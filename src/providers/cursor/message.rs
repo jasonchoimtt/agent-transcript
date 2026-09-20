@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::TimeZone as _;
 
+use crate::providers::extract_xml_tag;
 use crate::tree_operation::TreeOperation;
 use crate::tree_scroll_view::state::{HiddenState, MessageState, MessageType};
 
@@ -69,7 +70,9 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
 
         "user" => {
             let raw = extract_content_text(&obj["content"]);
+            let notification = format_system_notification(&strip_timestamp(&raw).0);
             let (text, ts_str) = strip_message_tags(&raw);
+            let text = notification.clone().unwrap_or(text);
             let timestamp = ts_str.as_deref().and_then(parse_timestamp);
             // No <user_query> and starts with <user_info> → pure Cursor context injection.
             let is_injected = text.trim().starts_with("<user_info>");
@@ -88,6 +91,8 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 });
             if is_summary {
                 user_msg = user_msg.tag("summary").brief("[Conversation summary]");
+            } else if notification.is_some() {
+                user_msg = user_msg.tag("system_notification");
             }
             if let Some(ts) = timestamp {
                 user_msg = user_msg.timestamp(ts);
@@ -371,21 +376,58 @@ fn extract_content_text(content: &serde_json::Value) -> String {
     }
 }
 
+/// Removes the `<timestamp>…</timestamp>` block from user message text.
+/// Returns `(remaining_text, timestamp_string)`.
+fn strip_timestamp(text: &str) -> (String, Option<String>) {
+    if let Some(start) = text.find("<timestamp>")
+        && let Some(end_rel) = text[start..].find("</timestamp>")
+    {
+        let inner = text[start + "<timestamp>".len()..start + end_rel].to_string();
+        let before = &text[..start];
+        let after = &text[start + end_rel + "</timestamp>".len()..];
+        return (format!("{}{}", before, after), Some(inner));
+    }
+    (text.to_string(), None)
+}
+
+/// Formats a Cursor `<system_notification>` user message (injected when a
+/// background task finishes) as a one-line summary like
+/// `"Completed: Restart dev server"`.  `text` must already have its timestamp
+/// stripped.  Returns `None` when `text` is not a notification or lacks a
+/// `<task>` block with a `title`.
+fn format_system_notification(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    if !text.starts_with("<system_notification>") {
+        return None;
+    }
+    let task = extract_xml_tag(text, "task")?;
+    let field = |key: &str| {
+        task.lines().find_map(|line| {
+            let (k, v) = line.trim().split_once(':')?;
+            (k.trim() == key).then(|| v.trim())
+        })
+    };
+    let title = field("title").filter(|t| !t.is_empty())?;
+    let label = match field("status").unwrap_or("") {
+        "success" | "completed" => "Completed".to_string(),
+        "error" | "failure" | "failed" => "Failed".to_string(),
+        "cancelled" | "canceled" | "aborted" => "Cancelled".to_string(),
+        "" => "Finished".to_string(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    };
+    Some(format!("{label}: {title}"))
+}
+
 /// Strips `<timestamp>…</timestamp>` and `<user_query>…</user_query>` wrappers
 /// from user message text.  Returns `(display_text, timestamp_string)`.
 fn strip_message_tags(text: &str) -> (String, Option<String>) {
-    let (ts_str, rest) = if let Some(start) = text.find("<timestamp>") {
-        if let Some(end_rel) = text[start..].find("</timestamp>") {
-            let inner = text[start + "<timestamp>".len()..start + end_rel].to_string();
-            let before = &text[..start];
-            let after = &text[start + end_rel + "</timestamp>".len()..];
-            (Some(inner), format!("{}{}", before, after))
-        } else {
-            (None, text.to_string())
-        }
-    } else {
-        (None, text.to_string())
-    };
+    let (rest, ts_str) = strip_timestamp(text);
 
     let display = if let Some(start) = rest.find("<user_query>") {
         if let Some(end_rel) = rest[start..].find("</user_query>") {
@@ -627,6 +669,80 @@ mod tests {
             !user_msg.unwrap().hidden.is_hidden(),
             "real user message should not be hidden"
         );
+    }
+
+    fn notification_content(status: &str) -> String {
+        format!(
+            "<timestamp>Friday, Sep 18, 2026, 3:43 PM (UTC+8)</timestamp>\n\
+             <system_notification>\n\
+             The following task has finished. If you were already aware, ignore this notification and do not restate prior responses.\n\n\
+             <task>\nkind: shell\nstatus: {status}\ntask_id: 795680\ntitle: Restart worktree DAI dev server\n</task>\n\
+             </system_notification>\n\
+             <user_query>Briefly inform the user about the task result and perform any follow-up actions (if needed).</user_query>"
+        )
+    }
+
+    fn parse_single_user_msg(content: &str) -> MessageState {
+        let blob = serde_json::json!({"role": "user", "content": content});
+        let mut state = ParseState::new();
+        let ops = parse_blob(&fake_blob_id(), blob.to_string().as_bytes(), &mut state);
+        ops.into_iter()
+            .find_map(|op| match op {
+                TreeOperation::Append { message, .. } if message.id.starts_with("user_msg:") => {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .expect("user message")
+    }
+
+    #[test]
+    fn test_system_notification_is_summarized() {
+        let msg = parse_single_user_msg(&notification_content("success"));
+        assert_eq!(
+            msg.text.as_deref(),
+            Some("Completed: Restart worktree DAI dev server")
+        );
+        assert_eq!(msg.tag.as_deref(), Some("system_notification"));
+        assert_eq!(msg.message_type, MessageType::UserMessage);
+        assert!(msg.timestamp.is_some());
+        assert!(!msg.hidden.is_hidden());
+    }
+
+    #[test]
+    fn test_system_notification_status_labels() {
+        let cases = [
+            ("error", "Failed"),
+            ("cancelled", "Cancelled"),
+            ("timeout", "Timeout"),
+        ];
+        for (status, label) in cases {
+            let msg = parse_single_user_msg(&notification_content(status));
+            assert_eq!(
+                msg.text.as_deref(),
+                Some(format!("{label}: Restart worktree DAI dev server").as_str()),
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_notification_without_task_falls_back() {
+        let content = "<system_notification>\nSomething happened\n</system_notification>\n<user_query>Do the thing</user_query>";
+        let msg = parse_single_user_msg(content);
+        assert_eq!(msg.text.as_deref(), Some("Do the thing"));
+        assert_eq!(msg.tag, None);
+    }
+
+    #[test]
+    fn test_system_notification_mid_message_not_detected() {
+        let content = format!(
+            "<user_query>Why does this show up?\n{}</user_query>",
+            "<system_notification><task>\nstatus: success\ntitle: X\n</task></system_notification>"
+        );
+        let msg = parse_single_user_msg(&content);
+        assert!(msg.text.as_deref().unwrap().starts_with("Why does this show up?"));
+        assert_eq!(msg.tag, None);
     }
 
     #[test]
