@@ -198,9 +198,11 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
 
                 let old_node_id = format!("tool_call:{}", tool_call_id);
 
+                // Structured result details live on the tool *message*, not the block.
                 // Shell reports `isBackground` beside `success`, Task inside it.  Shells
                 // backgrounded after a timeout carry only `backgroundReason`.
-                let output = &obj["providerOptions"]["cursor"]["highLevelToolCallResult"]["output"];
+                let high_level = &obj["providerOptions"]["cursor"]["highLevelToolCallResult"];
+                let output = &high_level["output"];
                 let success = &output["success"];
                 let is_background = output["isBackground"].as_bool().unwrap_or(false)
                     || success["isBackground"].as_bool().unwrap_or(false)
@@ -223,13 +225,16 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                 if tool_name == "Task" {
                     // The Task call stays a ToolCall; its outcome (and, on success, the
                     // subagent's conversation steps) become its children.
-                    let task_output =
-                        &block["providerOptions"]["cursor"]["highLevelToolCallResult"]["output"];
-                    let failure = &task_output["failure"];
-                    let is_error = !failure.is_null();
+                    let error = &output["error"];
+                    let is_error =
+                        !error.is_null() || high_level["isError"].as_bool().unwrap_or(false);
 
                     let children = if is_error {
-                        let failure_text = failure.as_str().unwrap_or("[task failed]").to_string();
+                        let failure_text = error["error"]
+                            .as_str()
+                            .or_else(|| block["result"].as_str())
+                            .unwrap_or("[task failed]")
+                            .to_string();
                         vec![
                             MessageState::new(format!("tool_result:{}", tool_call_id))
                                 .text(failure_text)
@@ -241,16 +246,25 @@ pub fn parse_blob(blob_id: &str, data: &[u8], state: &mut ParseState) -> Vec<Tre
                                 .tag("error"),
                         ]
                     } else {
-                        let steps = task_output["success"]["conversationSteps"]
+                        // Full step list only in legacy sessions; see `build_subagent_node`.
+                        let steps = success["conversationSteps"]
                             .as_array()
                             .cloned()
                             .unwrap_or_default();
+                        let summary_text = extract_task_result_text(block);
+                        // The subagent's final message is already quoted in the summary
+                        // (in new sessions it's the only step), so don't repeat it.
+                        let steps = steps.iter().enumerate().filter(|(_, step)| {
+                            step["assistantMessage"]["text"]
+                                .as_str()
+                                .is_none_or(|t| !summary_text.contains(t.trim()))
+                        });
                         let summary = MessageState::new(format!("task_summary:{}", tool_call_id))
-                            .text(extract_task_result_text(block))
+                            .text(summary_text.clone())
                             .data(block.to_string())
                             .message_type(MessageType::TaskSummary);
                         std::iter::once(summary)
-                            .chain(steps.iter().enumerate().filter_map(|(i, step)| {
+                            .chain(steps.filter_map(|(i, step)| {
                                 build_subagent_node(tool_call_id, i, step)
                             }))
                             .collect()
@@ -619,6 +633,15 @@ fn extract_args_props(args: &serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
+/// Converts one inlined `conversationSteps` entry of a Task result into a child node.
+///
+/// **Legacy format.**  Older Cursor versions (sessions up to ~June 2026) inlined the
+/// subagent's whole conversation in the Task result.  Newer versions write each subagent
+/// to its own chat DB (`~/.cursor/chats/<workspace>/<agentId>/store.db`, whose meta
+/// carries `subagentInfo.{parentAgentId, toolCallId}`) and inline only the final
+/// assistant message here.  Reading those separate subagent DBs is not implemented yet
+/// (unlike the Claude provider's `subagent.rs`), so for new sessions a Task shows just
+/// its summary.
 fn build_subagent_node(
     tool_call_id: &str,
     i: usize,
@@ -648,21 +671,44 @@ fn build_subagent_node(
                 .message_type(MessageType::AgentMessage),
         );
     }
-    if !step["toolCall"].is_null() {
-        let tc = &step["toolCall"];
-        let name = tc["toolName"]
-            .as_str()
-            .or_else(|| tc["name"].as_str())
-            .unwrap_or("?");
-        let args = tc["args"].as_str().unwrap_or("");
-        let result = tc["result"].as_str().unwrap_or("");
-        let text = format!("{}: {}\n→ {}", name, args, result);
-        return Some(
-            MessageState::new(format!("subagent_tool:{}:{}", tool_call_id, i))
-                .text(text)
-                .data(step.to_string())
-                .message_type(MessageType::ToolCall),
-        );
+    // Tool steps are keyed by kind: `{"toolCall": {"shellToolCall": {"args": {…}, "result": {…}}}}`.
+    if let Some((kind, call)) = step["toolCall"]
+        .as_object()
+        .and_then(|tc| tc.iter().find(|(k, _)| k.ends_with("ToolCall")))
+    {
+        // `readToolCall` → `Read`, `webFetchToolCall` → `WebFetch`.
+        let kind = kind.trim_end_matches("ToolCall");
+        let mut chars = kind.chars();
+        let name: String = chars
+            .next()
+            .map(|c| c.to_uppercase().chain(chars).collect())
+            .unwrap_or_default();
+
+        let result = &call["result"];
+        let tag = if !result["success"].is_null() {
+            Some("success")
+        } else if ["failure", "error", "permissionDenied"]
+            .iter()
+            .any(|k| !result[*k].is_null())
+        {
+            Some("error")
+        } else {
+            None
+        };
+
+        let mut node = MessageState::new(format!("subagent_tool:{}:{}", tool_call_id, i))
+            .text(name)
+            .data(step.to_string())
+            .message_type(MessageType::ToolCall);
+        // ToolFormatter renders the name + props into the call's display line.
+        if let Some(serde_json::Value::Object(mut args)) = extract_args_props(&call["args"]) {
+            args.remove("toolCallId");
+            node = node.props(serde_json::Value::Object(args));
+        }
+        if let Some(tag) = tag {
+            node = node.tag(tag);
+        }
+        return Some(node);
     }
     None
 }
@@ -962,6 +1008,82 @@ mod tests {
         assert_eq!(message.children.len(), 1);
         assert_eq!(message.children[0].id, "task_summary:tc2");
         assert_eq!(message.children[0].text.as_deref(), Some("done"));
+    }
+
+    /// Parses a Task tool result whose message-level `highLevelToolCallResult` is `hl`.
+    fn parse_task_result(result: &str, hl: serde_json::Value) -> MessageState {
+        let mut state = ParseState::new();
+        state.pending_tool_calls.insert(
+            "tc".to_string(),
+            serde_json::json!({"type": "tool-call", "toolName": "Task", "toolCallId": "tc",
+                               "args": {"description": "Explore"}}),
+        );
+        let tool_blob = serde_json::json!({
+            "role": "tool",
+            "content": [{"type": "tool-result", "toolName": "Task", "toolCallId": "tc", "result": result}],
+            "providerOptions": {"cursor": {"highLevelToolCallResult": hl}}
+        });
+        let ops = parse_blob(&"d".repeat(64), tool_blob.to_string().as_bytes(), &mut state);
+        match ops.into_iter().next() {
+            Some(TreeOperation::Replace { message, .. }) => message,
+            _ => panic!("expected Replace"),
+        }
+    }
+
+    #[test]
+    fn test_task_result_renders_conversation_steps() {
+        let task = parse_task_result(
+            "Report: done",
+            serde_json::json!({"output": {"success": {"conversationSteps": [
+                {"thinkingMessage": {"text": "hmm", "durationMs": 5}},
+                {"assistantMessage": {"text": "Looking."}},
+                // Final message, already quoted in the summary → skipped.
+                {"assistantMessage": {"text": "done"}},
+                {"toolCall": {"shellToolCall": {
+                    "args": {"command": "ls", "toolCallId": "x"},
+                    "result": {"success": {"exitCode": 0}}}}},
+                {"toolCall": {"webFetchToolCall": {
+                    "args": {"url": "https://example.com"},
+                    "result": {"failure": {"message": "nope"}}}}},
+            ]}}}),
+        );
+        assert_eq!(task.tag.as_deref(), Some("success"));
+        let kids: Vec<_> = task
+            .children
+            .iter()
+            .map(|c| (c.message_type.clone(), c.text.clone().unwrap_or_default(), c.tag.clone()))
+            .collect();
+        assert_eq!(
+            kids,
+            vec![
+                (MessageType::TaskSummary, "Report: done".to_string(), None),
+                (MessageType::Thinking, "hmm".to_string(), None),
+                (MessageType::AgentMessage, "Looking.".to_string(), None),
+                (MessageType::ToolCall, "Shell".to_string(), Some("success".to_string())),
+                (MessageType::ToolCall, "WebFetch".to_string(), Some("error".to_string())),
+            ]
+        );
+        assert_eq!(
+            task.children[3].props,
+            Some(serde_json::json!({"command": "ls"})),
+            "args become props, minus toolCallId"
+        );
+    }
+
+    #[test]
+    fn test_task_error_result_is_tagged_error() {
+        let task = parse_task_result(
+            "Error: Invalid arguments",
+            serde_json::json!({"output": {"error": {"error": "Invalid arguments:\nbad subagent_type"}},
+                               "isError": true}),
+        );
+        assert_eq!(task.tag.as_deref(), Some("error"));
+        assert_eq!(task.children.len(), 1);
+        assert_eq!(task.children[0].message_type, MessageType::ToolResult);
+        assert_eq!(
+            task.children[0].text.as_deref(),
+            Some("Invalid arguments:\nbad subagent_type")
+        );
     }
 
     #[test]
