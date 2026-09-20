@@ -47,19 +47,23 @@ impl Theme {
         .expect("built-in dark.toml + styles.toml must be valid")
     }
 
-    /// Load the theme from config, detecting light vs dark from `host_bg` when `mode = "auto"`.
-    /// Named palettes / styles are read from `{XDG_CONFIG_HOME}/agent-transcript/palettes/` and
-    /// `styles/`. Unset names use the bundled defaults; missing or unreadable files are errors.
-    pub fn load(config: &ThemeConfig, host_bg: Option<RgbColor>) -> color_eyre::Result<Self> {
-        let is_light = match config.mode.as_deref().unwrap_or("auto") {
+    /// Resolve the configured theme mode to light (`true`) or dark (`false`), detecting from
+    /// `host_bg` when `mode = "auto"`.
+    pub fn is_light_mode(config: &ThemeConfig, host_bg: Option<RgbColor>) -> bool {
+        match config.mode.as_deref().unwrap_or("auto") {
             "light" => true,
             "dark" => false,
             // "auto" (or any unrecognised value): infer from host background luminance.
             _ => host_bg
                 .map(|bg| relative_luminance(bg) > 0.5)
                 .unwrap_or(false),
-        };
+        }
+    }
 
+    /// Load the light or dark theme from config.
+    /// Named palettes / styles are read from `{XDG_CONFIG_HOME}/agent-transcript/palettes/` and
+    /// `styles/`. Unset names use the bundled defaults; missing or unreadable files are errors.
+    pub fn load(config: &ThemeConfig, is_light: bool) -> color_eyre::Result<Self> {
         let base_dir = crate::config::xdg_config_dir().join("agent-transcript");
 
         let palette_name = if is_light {

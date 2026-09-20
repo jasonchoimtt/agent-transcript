@@ -390,6 +390,9 @@ impl App {
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('P') {
             // Shift-P: toggle pinned prompt box.
             self.prompt_pinned = !self.prompt_pinned;
+        } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('T') {
+            // Shift-T: toggle light / dark theme.
+            self.toggle_theme();
         } else if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('I') {
             // Shift-I: open session info view.
             self.open_session_info();

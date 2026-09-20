@@ -80,6 +80,8 @@ pub struct App {
     terminal: TerminalPanel,
     tree_state: TreeScrollViewState,
     theme: Theme,
+    /// True when `theme` is the light variant; flipped at runtime by the theme toggle key.
+    theme_is_light: bool,
     /// Cached host terminal background color (queried at startup via OSC 11 or $COLORFGBG).
     host_bg: Option<RgbColor>,
     _reader_task: Option<JoinHandle<()>>,
@@ -129,13 +131,15 @@ impl App {
         debug_writer: crate::logging::DebugHandle,
     ) -> color_eyre::Result<Self> {
         let events = EventHandler::new();
+        let theme_is_light = Theme::is_light_mode(&config.theme, host_bg);
 
         let mut app = Self {
             running: true,
             events,
             terminal: TerminalPanel::absent(),
             tree_state: TreeScrollViewState::new(vec![]),
-            theme: Theme::load(&config.theme, host_bg)?,
+            theme: Theme::load(&config.theme, theme_is_light)?,
+            theme_is_light,
             host_bg,
             _reader_task: None,
             screen: AppScreen::Transcript,
@@ -688,6 +692,30 @@ impl App {
             workspace_path,
             &self.config.widgets.tool_result.file_delta,
         )
+    }
+
+    /// Switch between the light and dark theme variants.
+    fn toggle_theme(&mut self) {
+        let is_light = !self.theme_is_light;
+        match Theme::load(&self.config.theme, is_light) {
+            Ok(theme) => {
+                self.theme = theme;
+                self.theme_is_light = is_light;
+                let name = if is_light { "light" } else { "dark" };
+                self.flash_message = Some((
+                    format!("Switched to {name} theme"),
+                    false,
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.flash_message = Some((
+                    format!("Failed to load theme: {e}"),
+                    true,
+                    std::time::Instant::now(),
+                ));
+            }
+        }
     }
 
     fn agent_config(&self, provider: &ProviderKind) -> &AgentConfig {

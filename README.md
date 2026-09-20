@@ -261,6 +261,8 @@ light = "light"  # Name of the light palette to use: {config_dir}/palettes/{name
 styles = "styles"  # Name of the styles to use: {config_dir}/styles/{name}.toml
 ```
 
+Press Shift-T to toggle between the light and dark theme at runtime.
+
 Palettes define colour tokens, which are used by the styles file to determine how to render messages. Refer to the default palette and styles files for more information.
 
 ## Contributing
